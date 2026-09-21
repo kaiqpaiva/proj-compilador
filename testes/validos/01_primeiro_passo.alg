@@ -1,0 +1,6 @@
+algoritmo "PrimeiroPasso"
+var
+// A área de variáveis está vazia
+inicio
+escreval("Olá, mundo!")
+fimalgoritmo

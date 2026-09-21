@@ -1,0 +1,5 @@
+compilador
+compilador.exe
+*.o
+saida_tokens.txt
+.vscode/
