@@ -7,13 +7,15 @@ Integrantes:
 1. O QUE FOI CONCLUIDO
   [x] Etapa 1 - Expressoes regulares e gramatica (docs/etapa1_gramatica.md)
   [X] Etapa 2 - Analisador lexico
-  [ ] Etapa 3 - Analisador sintatico
+  [X] Etapa 3 - Analisador sintatico
 
 2. COMO COMPILAR E EXECUTAR
   gcc -Wall -Wno-unused-result -g -Og compilador.c -o compilador
   ./compilador testes/validos/01_primeiro_passo.alg
 
-  Os tokens aparecem na tela e sao salvos em saida_tokens.txt
+  Os tokens aparecem na tela e sao salvos em saida_tokens.txt.
+  Ao final aparece "Analise sintatica concluida sem erros." ou a
+  mensagem de ERRO LEXICO / ERRO SINTATICO com a linha do erro.
 
 3. DECISOES DE DESIGN
   - Tudo fica em um unico compilador.c porque o comando de compilacao
@@ -50,6 +52,15 @@ Integrantes:
     antes do exit(1). Sem o fclose os tokens ja escritos ficariam no
     buffer do stdio e o arquivo sairia vazio justamente nos testes de
     erro.
+  - O analisador sintatico e descendente recursivo preditivo (LL(1)):
+    uma funcao por nao-terminal da gramatica da Etapa 1, escolhendo a
+    producao so pelo token atual (lookahead), sem retrocesso.
+  - O parser dirige o lexico: cada token e pedido com nextToken() e
+    impresso na hora, entao a listagem e a analise saem numa passagem so.
+  - A mensagem de erro sintatico mostra o token esperado e o encontrado,
+    e tambem e gravada em saida_tokens.txt.
+  - No fim, o main so confere que o token atual e EOF (sem consumir),
+    para nao pedir um token depois do fim do arquivo.
 
 4. BUGS CONHECIDOS
   - inserirSimbolo nao verifica se a tabela de simbolos encheu. Acima de

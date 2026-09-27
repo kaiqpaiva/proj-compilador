@@ -14,7 +14,8 @@
  *  Executar:
  *    ./compilador testes/validos/01_primeiro_passo.alg
  *
- *  Saida: tokens na tela e no arquivo saida_tokens.txt
+ *  Saida: tokens e resultado da analise sintatica na tela e no
+ *  arquivo saida_tokens.txt
  * ============================================================
  */
 
@@ -344,18 +345,21 @@ int igualSemCaixa(const char *a, const char *b)
  *  4. TRATAMENTO DE ERROS
  * ============================================================ */
 
+void erroSintatico(Token token, const char *esperado)
+{
+    printf("%d# ERRO SINTATICO: esperado %s, encontrado %s\n",
+           token.line, esperado, nomeDoToken(token.type));
+    fprintf(arquivoSaida, "%d# ERRO SINTATICO: esperado %s, encontrado %s\n",
+            token.line, esperado, nomeDoToken(token.type));
+    fclose(arquivoSaida);
+    exit(1);
+}
+
 void erroLexico(int linha, const char *sequencia)
 {
     printf("%d# ERRO LEXICO: '%s'\n", linha, sequencia);
     fprintf(arquivoSaida, "%d# ERRO LEXICO: '%s'\n", linha, sequencia);
     fclose(arquivoSaida);
-    exit(1);
-}
-
-void erroSintatico(Token token)
-{
-    printf("%d# ERRO SINTATICO: token inesperado %s\n",
-           token.line, nomeDoToken(token.type));
     exit(1);
 }
 
@@ -667,15 +671,395 @@ void consumir(TokenNome esperado)
     if (lookahead.type == esperado)
         nextToken();
     else
-        erroSintatico(lookahead);
+        erroSintatico(lookahead, nomeDoToken(esperado));
 }
 
-/* TODO Etapa 3: uma funcao por nao-terminal da gramatica, ex:
- *   void programa(void);
- *   void declaracoes(void);
- *   void comando(void);
- *   void expressao(void);
- */
+
+/* uma funcao por nao-terminal da gramatica */
+void programa(void);
+void declaracoes(void);
+void secao_var(void);
+void decl_var(void);
+void lista_ids(void);
+void tipo(void);
+void tipo_basico(void);
+void procedimento(void);
+void funcao(void);
+void parametros(void);
+void parametro(void);
+void comandos(void);
+void comando(void);
+void cmd_id(void);
+void cmd_se(void);
+void cmd_para(void);
+void cmd_enquanto(void);
+void cmd_leia(void);
+void cmd_escreva(void);
+void cmd_retorne(void);
+void variavel(void);
+void argumentos(void);
+void expr(void);
+void expr_e(void);
+void expr_rel(void);
+void expr_arit(void);
+void termo(void);
+void fator(void);
+
+/* argumentos -> expr { "," expr } */
+void argumentos(void)
+{
+    expr();
+    while (lookahead.type == TOKEN_VIRGULA) {
+        consumir(TOKEN_VIRGULA);
+        expr();
+    }
+}
+
+/* expr -> expr_e { OU expr_e } */
+void expr(void)
+{
+    expr_e();
+    while (lookahead.type == TOKEN_OU) {
+        consumir(TOKEN_OU);
+        expr_e();
+    }
+}
+
+/* expr_e -> expr_rel { E expr_rel } */
+void expr_e(void)
+{
+    expr_rel();
+    while (lookahead.type == TOKEN_E) {
+        consumir(TOKEN_E);
+        expr_rel();
+    }
+}
+
+/* expr_rel -> expr_arit [ OP_REL expr_arit ] */
+void expr_rel(void)
+{
+    expr_arit();
+    if (lookahead.type == TOKEN_OP_REL) {
+        consumir(TOKEN_OP_REL);
+        expr_arit();
+    }
+}
+
+/* expr_arit -> termo { ( "+" | "-" ) termo } */
+void expr_arit(void)
+{
+    termo();
+    while (lookahead.type == TOKEN_SOMA || lookahead.type == TOKEN_SUB) {
+        nextToken();
+        termo();
+    }
+}
+
+/* termo -> fator { ( "*" | "/" | "\" | MOD ) fator } */
+void termo(void)
+{
+    fator();
+    while (lookahead.type == TOKEN_MULT || lookahead.type == TOKEN_DIV
+        || lookahead.type == TOKEN_DIV_INT || lookahead.type == TOKEN_MOD) {
+        nextToken();
+        fator();
+    }
+}
+
+/* fator -> NUM_INT | NUM_FLOAT | STRING | VERDADEIRO | FALSO
+ *        | "-" fator | "(" expr ")" | ID [ "[" expr "]" | "(" argumentos ")" ] */
+void fator(void)
+{
+    switch (lookahead.type) {
+        case TOKEN_NUM_INT:
+        case TOKEN_NUM_FLOAT:
+        case TOKEN_STRING:
+        case TOKEN_VERDADEIRO:
+        case TOKEN_FALSO:
+            nextToken();
+            break;
+        case TOKEN_SUB:
+            consumir(TOKEN_SUB);
+            fator();
+            break;
+        case TOKEN_ABRE_PAR:
+            consumir(TOKEN_ABRE_PAR);
+            expr();
+            consumir(TOKEN_FECHA_PAR);
+            break;
+        case TOKEN_ID:
+            consumir(TOKEN_ID);
+            if (lookahead.type == TOKEN_ABRE_COL) {
+                consumir(TOKEN_ABRE_COL);
+                expr();
+                consumir(TOKEN_FECHA_COL);
+            } else if (lookahead.type == TOKEN_ABRE_PAR) {
+                consumir(TOKEN_ABRE_PAR);
+                argumentos();
+                consumir(TOKEN_FECHA_PAR);
+            }
+            break;
+        default:
+            erroSintatico(lookahead, "expressao");
+    }
+}
+
+/* programa -> ALGORITMO STRING declaracoes INICIO comandos FIMALGORITMO */
+void programa(void)
+{
+    consumir(TOKEN_ALGORITMO);
+    consumir(TOKEN_STRING);
+    declaracoes();
+    consumir(TOKEN_INICIO);
+    comandos();
+    consumir(TOKEN_FIMALGORITMO);
+}
+
+/* declaracoes -> { secao_var | procedimento | funcao } */
+void declaracoes(void)
+{
+    while (1) {
+        if (lookahead.type == TOKEN_VAR)               secao_var();
+        else if (lookahead.type == TOKEN_PROCEDIMENTO) procedimento();
+        else if (lookahead.type == TOKEN_FUNCAO)       funcao();
+        else break;
+    }
+}
+
+/* secao_var -> VAR { decl_var } */
+void secao_var(void)
+{
+    consumir(TOKEN_VAR);
+    while (lookahead.type == TOKEN_ID)
+        decl_var();
+}
+
+/* decl_var -> lista_ids ":" tipo */
+void decl_var(void)
+{
+    lista_ids();
+    consumir(TOKEN_DOIS_PONTOS);
+    tipo();
+}
+
+/* lista_ids -> ID { "," ID } */
+void lista_ids(void)
+{
+    consumir(TOKEN_ID);
+    while (lookahead.type == TOKEN_VIRGULA) {
+        consumir(TOKEN_VIRGULA);
+        consumir(TOKEN_ID);
+    }
+}
+
+/* tipo -> tipo_basico | VETOR "[" NUM_INT ".." NUM_INT "]" DE tipo_basico */
+void tipo(void)
+{
+    if (lookahead.type == TOKEN_VETOR) {
+        consumir(TOKEN_VETOR);
+        consumir(TOKEN_ABRE_COL);
+        consumir(TOKEN_NUM_INT);
+        consumir(TOKEN_PONTO_PONTO);
+        consumir(TOKEN_NUM_INT);
+        consumir(TOKEN_FECHA_COL);
+        consumir(TOKEN_DE);
+    }
+    tipo_basico();
+}
+
+/* tipo_basico -> INTEIRO | REAL | CARACTERE | LOGICO */
+void tipo_basico(void)
+{
+    switch (lookahead.type) {
+        case TOKEN_INTEIRO:
+        case TOKEN_REAL:
+        case TOKEN_CARACTERE:
+        case TOKEN_LOGICO:
+            nextToken();
+            break;
+        default:
+            erroSintatico(lookahead, "tipo (inteiro, real, caractere ou logico)");
+    }
+}
+
+/* Devolve 1 se o token pode comecar um comando */
+int iniciaComando(TokenNome t)
+{
+    return t == TOKEN_ID || t == TOKEN_SE || t == TOKEN_PARA
+        || t == TOKEN_ENQUANTO || t == TOKEN_LEIA || t == TOKEN_ESCREVA
+        || t == TOKEN_ESCREVAL || t == TOKEN_RETORNE;
+}
+
+/* comandos -> { comando } */
+void comandos(void)
+{
+    while (iniciaComando(lookahead.type))
+        comando();
+}
+
+/* comando -> cmd_id | cmd_se | cmd_para | cmd_enquanto | cmd_leia | cmd_escreva | cmd_retorne */
+void comando(void)
+{
+    switch (lookahead.type) {
+        case TOKEN_ID:       cmd_id();       break;
+        case TOKEN_SE:       cmd_se();       break;
+        case TOKEN_PARA:     cmd_para();     break;
+        case TOKEN_ENQUANTO: cmd_enquanto(); break;
+        case TOKEN_LEIA:     cmd_leia();     break;
+        case TOKEN_ESCREVA:
+        case TOKEN_ESCREVAL: cmd_escreva();  break;
+        case TOKEN_RETORNE:  cmd_retorne();  break;
+        default:             erroSintatico(lookahead, "comando");
+    }
+}
+
+/* cmd_escreva -> ( ESCREVA | ESCREVAL ) "(" argumentos ")" */
+void cmd_escreva(void)
+{
+    nextToken();   /* comando() ja conferiu que e ESCREVA ou ESCREVAL */
+    consumir(TOKEN_ABRE_PAR);
+    argumentos();
+    consumir(TOKEN_FECHA_PAR);
+}
+
+/* cmd_id   -> ID resto_id
+ * resto_id -> "<-" expr | "[" expr "]" "<-" expr | "(" argumentos ")" | vazio */
+void cmd_id(void)
+{
+    consumir(TOKEN_ID);
+    if (lookahead.type == TOKEN_ATRIB) {
+        consumir(TOKEN_ATRIB);
+        expr();
+    } else if (lookahead.type == TOKEN_ABRE_COL) {
+        consumir(TOKEN_ABRE_COL);
+        expr();
+        consumir(TOKEN_FECHA_COL);
+        consumir(TOKEN_ATRIB);
+        expr();
+    } else if (lookahead.type == TOKEN_ABRE_PAR) {
+        consumir(TOKEN_ABRE_PAR);
+        argumentos();
+        consumir(TOKEN_FECHA_PAR);
+    }
+    /* senao: vazio, chamada de procedimento sem parametros */
+}
+
+/* cmd_leia -> LEIA "(" variavel ")" */
+void cmd_leia(void)
+{
+    consumir(TOKEN_LEIA);
+    consumir(TOKEN_ABRE_PAR);
+    variavel();
+    consumir(TOKEN_FECHA_PAR);
+}
+
+/* variavel -> ID [ "[" expr "]" ] */
+void variavel(void)
+{
+    consumir(TOKEN_ID);
+    if (lookahead.type == TOKEN_ABRE_COL) {
+        consumir(TOKEN_ABRE_COL);
+        expr();
+        consumir(TOKEN_FECHA_COL);
+    }
+}
+
+/* cmd_se -> SE expr ENTAO comandos [ SENAO comandos ] FIMSE */
+void cmd_se(void)
+{
+    consumir(TOKEN_SE);
+    expr();
+    consumir(TOKEN_ENTAO);
+    comandos();
+    if (lookahead.type == TOKEN_SENAO) {
+        consumir(TOKEN_SENAO);
+        comandos();
+    }
+    consumir(TOKEN_FIMSE);
+}
+
+/* cmd_para -> PARA ID DE expr ATE expr [ PASSO expr ] FACA comandos FIMPARA */
+void cmd_para(void)
+{
+    consumir(TOKEN_PARA);
+    consumir(TOKEN_ID);
+    consumir(TOKEN_DE);
+    expr();
+    consumir(TOKEN_ATE);
+    expr();
+    if (lookahead.type == TOKEN_PASSO) {
+        consumir(TOKEN_PASSO);
+        expr();
+    }
+    consumir(TOKEN_FACA);
+    comandos();
+    consumir(TOKEN_FIMPARA);
+}
+
+/* cmd_enquanto -> ENQUANTO expr FACA comandos FIMENQUANTO */
+void cmd_enquanto(void)
+{
+    consumir(TOKEN_ENQUANTO);
+    expr();
+    consumir(TOKEN_FACA);
+    comandos();
+    consumir(TOKEN_FIMENQUANTO);
+}
+
+/* cmd_retorne -> RETORNE expr */
+void cmd_retorne(void)
+{
+    consumir(TOKEN_RETORNE);
+    expr();
+}
+
+/* procedimento -> PROCEDIMENTO ID [ "(" parametros ")" ] INICIO comandos FIMPROCEDIMENTO */
+void procedimento(void)
+{
+    consumir(TOKEN_PROCEDIMENTO);
+    consumir(TOKEN_ID);
+    if (lookahead.type == TOKEN_ABRE_PAR) {
+        consumir(TOKEN_ABRE_PAR);
+        parametros();
+        consumir(TOKEN_FECHA_PAR);
+    }
+    consumir(TOKEN_INICIO);
+    comandos();
+    consumir(TOKEN_FIMPROCEDIMENTO);
+}
+
+/* funcao -> FUNCAO ID "(" parametros ")" ":" tipo_basico INICIO comandos FIMFUNCAO */
+void funcao(void)
+{
+    consumir(TOKEN_FUNCAO);
+    consumir(TOKEN_ID);
+    consumir(TOKEN_ABRE_PAR);
+    parametros();
+    consumir(TOKEN_FECHA_PAR);
+    consumir(TOKEN_DOIS_PONTOS);
+    tipo_basico();
+    consumir(TOKEN_INICIO);
+    comandos();
+    consumir(TOKEN_FIMFUNCAO);
+}
+
+/* parametros -> parametro { "," parametro } */
+void parametros(void)
+{
+    parametro();
+    while (lookahead.type == TOKEN_VIRGULA) {
+        consumir(TOKEN_VIRGULA);
+        parametro();
+    }
+}
+
+/* parametro -> ID ":" tipo_basico */
+void parametro(void)
+{
+    consumir(TOKEN_ID);
+    consumir(TOKEN_DOIS_PONTOS);
+    tipo_basico();
+}
 
 /* ============================================================
  *  7. MAIN
@@ -700,18 +1084,13 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* Etapa 2: lista todos os tokens */
-    do {
-        nextToken();
-    } while (lookahead.type != TOKEN_EOF);
-
-    /* Etapa 3 (depois): voltar ao inicio e chamar o parser
-     *   posicao = 0; linhaAtual = 1;
-     *   nextToken();
-     *   programa();
-     *   consumir(TOKEN_EOF);
-     *   printf("Analise sintatica concluida sem erros.\n");
-     */
+    /* Etapa 3: o parser pede os tokens ao lexico (uma passagem so) */
+    nextToken();
+    programa();
+    if (lookahead.type != TOKEN_EOF)
+      erroSintatico(lookahead, "fim do arquivo");
+    printf("Analise sintatica concluida sem erros.\n");
+    fprintf(arquivoSaida, "Analise sintatica concluida sem erros.\n");
 
     fclose(arquivoSaida);
     free(buffer);
