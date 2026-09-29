@@ -51,17 +51,17 @@ for f in testes/*/*.alg; do echo "== $f"; ./compilador $f | tail -1; done
 
 ### Analisador léxico
 
-- **Tokens de palavras reservadas:** criamos um token para cada palavra reservada (`TOKEN_SE`, `TOKEN_ENTAO`...) em vez de um `TOKEN_KEYWORD` genérico, para facilitar o parser.
-- **Operador `<>`:** adicionamos `OP_NE` para esse operador, que aparece no anexo mas não está no enum do enunciado. A igualdade no Visualg é `=`, não `==`.
-- **Maiúsculas e minúsculas:** as palavras reservadas são reconhecidas sem diferenciar maiúsculas de minúsculas, porque o anexo usa `MOD` e `E` em maiúsculo.
-- **Separação por espaço:** o enunciado diz que os lexemas estão separados por espaço, mas os exemplos do anexo não seguem isso (ex: `escreval("...")`). O léxico foi feito para funcionar mesmo sem espaços.
-- **Registro dos tokens:** o léxico registra cada token dentro de `obterToken`, que é uma casca fina sobre `reconhecerToken`. Assim a listagem sai numa passagem só, conforme a Figura 1 do enunciado, com o parser dirigindo o léxico. Isso só é seguro porque a gramática é LL(1) e nenhum token é lido duas vezes.
-- **Buffer do `infoToken`:** `infoToken` monta a linha de saída num buffer fornecido pelo chamador, em vez de um buffer `static` interno. Assim, duas chamadas no mesmo `printf` não sobrescrevem uma à outra, desde que cada uma receba o seu próprio buffer.
-- **Cadeias com aspas:** as cadeias são guardadas na tabela de símbolos **com** as aspas, para que a cadeia `"idade"` e a variável `idade` não ocupem o mesmo índice.
-- **Lexemas longos:** um lexema com mais de 255 caracteres gera `ERRO LEXICO` em vez de ser truncado em silêncio. Truncar faria dois identificadores longos e diferentes virarem o mesmo símbolo.
-- **Faixa `1..4`:** em `1..4`, o léxico devolve `NUM_INT` e deixa o `..` para a chamada seguinte. Um ponto seguido de algo que não é dígito nem ponto (ex: `1.`) é um real malformado e gera erro léxico.
-- **Tabela de nomes dos tokens:** é um array indexado pelo enum, com um sentinela `TOKEN_TOTAL` e um `_Static_assert` que quebra a compilação se as duas listas ficarem dessincronizadas.
-- **Fechamento do arquivo no erro léxico:** `erroLexico` grava a mensagem na tela e no arquivo, e fecha o arquivo antes do `exit(1)`. Sem o `fclose`, os tokens já escritos ficariam no buffer do stdio, e o arquivo sairia vazio justamente nos testes de erro.
+- Criamos um token para cada palavra reservada (`TOKEN_SE`, `TOKEN_ENTAO`, ...) em vez de um `TOKEN_KEYWORD` único. É a mesma ideia que o enunciado já aplica em `TOKEN_OP_REL` com o `OpRelAtributo`: quando o parser precisa distinguir, vira token próprio; quando não precisa, vira atributo. Por isso o `TOKEN_KEYWORD` não aparece no nosso enum.
+- Incluímos `OP_NE` na lista de operadores relacionais, porque `<>` aparece nos exemplos do anexo. Vale notar também que a igualdade no Visualg é `=`, e não `==`.
+- As palavras reservadas são reconhecidas sem diferenciar maiúsculas de minúsculas, já que o anexo escreve `MOD` e `E` em maiúsculo e o resto em minúsculo.
+- O enunciado garante que os lexemas vêm separados por espaço. Como alguns exemplos do anexo aparecem sem espaço (`escreval("...")`), deixamos o léxico preparado para os dois casos.
+- `obterToken` é uma casca fina sobre `reconhecerToken` e já registra o token na listagem. Assim a saída é gerada em uma passagem só, com o parser chamando o léxico como na Figura 1. Isso funciona porque a gramática é LL(1) e nenhum token é lido duas vezes.
+- `infoToken` monta a linha num buffer passado pelo chamador, em vez de um `static` interno. Dessa forma duas chamadas no mesmo `printf` não sobrescrevem uma à outra.
+- As cadeias são guardadas na tabela de símbolos com as aspas, para que a cadeia `"idade"` e a variável `idade` não ocupem o mesmo índice.
+- Um lexema com mais de 255 caracteres gera `ERRO LEXICO` em vez de ser truncado. Se truncássemos, dois identificadores longos e diferentes virariam o mesmo símbolo.
+- Em `1..4`, devolvemos `NUM_INT` e deixamos o `..` para a chamada seguinte. Um ponto seguido de algo que não é dígito nem ponto (como `1.`) é tratado como real malformado.
+- A tabela com os nomes dos tokens é um array indexado pelo enum, com o sentinela `TOKEN_TOTAL` e um `_Static_assert` que quebra a compilação se as duas listas saírem de sincronia.
+- `erroLexico` escreve a mensagem na tela e no arquivo e fecha o arquivo antes do `exit(1)`. Sem o `fclose`, os tokens já escritos ficariam no buffer do stdio e o arquivo sairia vazio justamente nos testes de erro.
 
 ### Analisador sintático
 
