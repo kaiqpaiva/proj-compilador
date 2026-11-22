@@ -1162,7 +1162,7 @@ void cmd_enquanto(void);
 void cmd_leia(void);
 void cmd_escreva(void);
 void cmd_retorne(void);
-void variavel(void);
+int variavel(void);
 void argumentos(void);
 void expr(void);
 void expr_e(void);
@@ -1578,7 +1578,18 @@ void cmd_escreva(void)
 {
       nextToken();   /* comando() ja conferiu que e ESCREVA ou ESCREVAL */
       consumir(TOKEN_ABRE_PAR);
-      argumentos();
+
+      do
+      {
+            if (lookahead.type == TOKEN_VIRGULA)
+                  consumir(TOKEN_VIRGULA);
+
+            int ehTexto = (lookahead.type == TOKEN_STRING);
+            expr();
+            if (!ehTexto)
+                  emitir("IMPR");
+      } while (lookahead.type == TOKEN_VIRGULA);
+
       consumir(TOKEN_FECHA_PAR);
 }
 
@@ -1632,7 +1643,9 @@ void cmd_leia(void)
 {
       consumir(TOKEN_LEIA);
       consumir(TOKEN_ABRE_PAR);
-      variavel();
+      int idx = variavel();
+      emitir("LEIT");
+      emitirNome("ARMZ", nomeDoSimbolo(idx));
       consumir(TOKEN_FECHA_PAR);
 }
 
@@ -1641,8 +1654,9 @@ void cmd_leia(void)
  * ------------------------------------------------------------
  * Variavel simples ou elemento de vetor, como notas[i].
  */
-void variavel(void)
+int variavel(void)
 {
+      int idx = lookahead.attribute.table_index;
       consumir(TOKEN_ID);
       if (lookahead.type == TOKEN_ABRE_COL)
       {
@@ -1650,6 +1664,7 @@ void variavel(void)
             expr();
             consumir(TOKEN_FECHA_COL);
       }
+      return idx;
 }
 
 /*
@@ -1661,15 +1676,25 @@ void variavel(void)
  */
 void cmd_se(void)
 {
+      int rotuloSenao = proximo_rotulo();
+      int rotuloFim = proximo_rotulo();
+
       consumir(TOKEN_SE);
       expr();
+      emitirDesvio("DSVF", rotuloSenao);
       consumir(TOKEN_ENTAO);
       comandos();
       if (lookahead.type == TOKEN_SENAO)
       {
+            emitirDesvio("DSVS", rotuloFim);
+            emitirRotulo(rotuloSenao);
             consumir(TOKEN_SENAO);
             comandos();
+            emitirRotulo(rotuloFim);
       }
+      else
+            emitirRotulo(rotuloSenao);
+
       consumir(TOKEN_FIMSE);
 }
 
@@ -1706,10 +1731,17 @@ void cmd_para(void)
  */
 void cmd_enquanto(void)
 {
+      int rotuloInicio = proximo_rotulo();
+      int rotuloFim = proximo_rotulo();
+
       consumir(TOKEN_ENQUANTO);
+      emitirRotulo(rotuloInicio);
       expr();
+      emitirDesvio("DSVF", rotuloFim);
       consumir(TOKEN_FACA);
       comandos();
+      emitirDesvio("DSVS", rotuloInicio);
+      emitirRotulo(rotuloFim);
       consumir(TOKEN_FIMENQUANTO);
 }
 
