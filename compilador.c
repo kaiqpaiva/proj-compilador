@@ -58,6 +58,8 @@
 #define MAX_LEXEMA      256     /* tamanho maximo de um lexema, com o '\0' */
 #define MAX_SIMBOLOS    512     /* entradas da tabela de simbolos          */
 #define MAX_LINHA_SAIDA 64      /* tamanho da linha formatada de um token  */
+#define MAX_ROTINAS     32      /* procedimentos e funcoes do programa    */
+#define MAX_PARAMS      8       /* parametros por rotina                  */
 
 /* ============================================================
  *  1. DEFINICAO DOS TOKENS (Figura 2 do enunciado + extras)
@@ -269,6 +271,29 @@ typedef struct {
       } attribute;
 } Token;
 
+/*
+ * Uma rotina declarada no programa (procedimento ou funcao).
+ *
+ * A minitabela de simbolos (TNo) guarda so variaveis, entao as rotinas
+ * ficam numa tabela propria. Ela serve as duas partes da fase 2: a
+ * analise semantica usa os tipos para conferir chamadas e retornos, e a
+ * geracao de codigo usa o rotulo e os nomes dos parametros para montar
+ * a chamada (CHPR).
+ *
+ * Nomes e parametros sao guardados como indices na tabelaSimbolos, o
+ * mesmo atributo table_index do token. Os tipos usam o proprio enum de
+ * tokens (TOKEN_INTEIRO, TOKEN_REAL, TOKEN_CARACTERE, TOKEN_LOGICO).
+ */
+typedef struct {
+      int nome;                         /* indice do nome na tabelaSimbolos */
+      int ehFuncao;                     /* 1 = funcao, 0 = procedimento     */
+      int rotulo;                       /* rotulo do inicio do codigo       */
+      int numParams;                    /* quantidade de parametros         */
+      int params[MAX_PARAMS];           /* indice de cada parametro, em ordem */
+      TokenNome tiposParams[MAX_PARAMS];/* tipo de cada parametro           */
+      TokenNome tipoRetorno;            /* tipo de retorno (so funcao)      */
+} Rotina;
+
 /* Par lexema -> token usado na tabela de palavras reservadas. */
 typedef struct {
       const char *lexema;
@@ -318,7 +343,7 @@ static char *buffer = NULL;         /* codigo fonte inteiro em memoria */
 static int posicao = 0;             /* posicao atual no buffer         */
 static int linhaAtual = 1;          /* linha atual do fonte            */
 static FILE *arquivoSaida = NULL;   /* saida_tokens.txt                */
-static FILE *arquivoMepa = NULL;
+static FILE *arquivoMepa = NULL;    /* saida_mepa.txt                  */
 
 static Token lookahead;             /* token atual visto pelo parser   */
 
@@ -330,6 +355,12 @@ static int totalSimbolos = 0;
 /* Quantidade de posicoes de memoria ocupadas pelas variaveis do
  * programa (um vetor conta o seu tamanho). E o valor do AMEM. */
 static int totalPosicoes = 0;
+
+/* Tabela de rotinas (procedimentos e funcoes), na ordem de declaracao. */
+static Rotina tabelaRotinas[MAX_ROTINAS];
+static int totalRotinas = 0;
+
+static Rotina *rotinaAtual = NULL;
 
 void encerrarComErro(void);
 
@@ -425,6 +456,56 @@ int inserirSimbolo(const char *lexema)
       strncpy(tabelaSimbolos[totalSimbolos], lexema, MAX_LEXEMA - 1);
       tabelaSimbolos[totalSimbolos][MAX_LEXEMA - 1] = '\0';
       return totalSimbolos++;
+}
+
+Rotina *inserirRotina(int nome, int ehFuncao)
+{
+      if (totalRotinas >= MAX_ROTINAS)
+      {
+            printf("ERRO: tabela de rotinas cheia (limite de %d rotinas)\n",
+                   MAX_ROTINAS);
+            fprintf(arquivoSaida,
+                    "ERRO: tabela de rotinas cheia (limite de %d rotinas)\n",
+                    MAX_ROTINAS);
+            encerrarComErro();
+      }
+
+      Rotina *r = &tabelaRotinas[totalRotinas];
+      r->nome = nome;
+      r->ehFuncao = ehFuncao;
+      r->numParams = 0;
+
+      totalRotinas++;
+
+      return r;
+}
+
+void adicionarParametro(Rotina *r, int nome, TokenNome tipo)
+{
+      if (r->numParams >= MAX_PARAMS)
+      {
+            printf("ERRO: rotina com parametros demais (limite de %d)\n",
+                   MAX_PARAMS);
+            fprintf(arquivoSaida,
+                    "ERRO: rotina com parametros demais (limite de %d)\n",
+                    MAX_PARAMS);
+            encerrarComErro();
+      }
+
+      r->params[r->numParams] = nome;
+      r->tiposParams[r->numParams] = tipo;
+
+      r->numParams++;
+}
+
+Rotina *buscarRotina(int nome)
+{
+      for (int i = 0; i < totalRotinas; i++)
+      {
+            if (tabelaRotinas[i].nome == nome)
+                  return &tabelaRotinas[i];
+      }
+      return NULL;
 }
 
 /*
@@ -621,6 +702,13 @@ void erroLexico(int linha, const char *sequencia)
 {
       printf("%d# ERRO LEXICO: '%s'\n", linha, sequencia);
       fprintf(arquivoSaida, "%d# ERRO LEXICO: '%s'\n", linha, sequencia);
+      encerrarComErro();
+}
+
+void erroSemantico(int linha, const char *sequencia)
+{
+      printf("%d# ERRO SEMANTICO: '%s'\n", linha, sequencia);
+      fprintf(arquivoSaida, "%d# ERRO SEMANTICO: '%s'\n", linha, sequencia);
       encerrarComErro();
 }
 
@@ -1035,6 +1123,11 @@ void emitirInteiro(const char *instr, int valor)
       fprintf(arquivoMepa, "    %s %d\n", instr, valor);
 }
 
+void emitirDoisInteiros(const char *instr, int valor1, int valor2)
+{
+      fprintf(arquivoMepa, "    %s %d,%d\n", instr, valor1, valor2);
+}
+
 void emitirReal(const char *instr, double valor)
 {
       fprintf(arquivoMepa, "    %s %g\n", instr, valor);
@@ -1059,6 +1152,17 @@ int proximo_rotulo(void)
 const char *nomeDoSimbolo(int indice)
 {
       return tabelaSimbolos[indice];
+}
+
+void gerarChamada(Rotina *r, int numArgs, int linha)
+{
+      if (numArgs != r->numParams)
+            erroSemantico(linha, "quantidade de argumentos incompativel com a declaracao da rotina");
+
+      for (int i = r->numParams - 1; i >= 0; i--)
+            emitirNome("ARMZ", nomeDoSimbolo(r->params[i]));
+
+      emitirDesvio("CHPR", r->rotulo);
 }
 
 /* ============================================================
@@ -1148,11 +1252,11 @@ void secao_var(void);
 void decl_var(void);
 int lista_ids(void);
 int tipo(void);
-void tipo_basico(void);
+TokenNome tipo_basico(void);
 void procedimento(void);
 void funcao(void);
-void parametros(void);
-void parametro(void);
+void parametros(Rotina *r);
+void parametro(Rotina *r);
 void comandos(void);
 void comando(void);
 void cmd_id(void);
@@ -1163,7 +1267,7 @@ void cmd_leia(void);
 void cmd_escreva(void);
 void cmd_retorne(void);
 int variavel(void);
-void argumentos(void);
+int argumentos(void);
 void expr(void);
 void expr_e(void);
 void expr_rel(void);
@@ -1177,14 +1281,17 @@ void fator(void);
  * Lista de expressoes separadas por virgula, usada nas chamadas de
  * escreva, escreval, procedimentos e funcoes.
  */
-void argumentos(void)
+int argumentos(void)
 {
+      int contador = 1;
       expr();
       while (lookahead.type == TOKEN_VIRGULA)
       {
             consumir(TOKEN_VIRGULA);
             expr();
+            contador++;
       }
+      return contador;
 }
 
 /*
@@ -1357,6 +1464,7 @@ void fator(void)
             case TOKEN_ID:
             {
                   int idx = lookahead.attribute.table_index;
+                  int linha = lookahead.line;
                   consumir(TOKEN_ID);
                   if (lookahead.type == TOKEN_ABRE_COL)
                   {
@@ -1368,9 +1476,17 @@ void fator(void)
                   else if (lookahead.type == TOKEN_ABRE_PAR)
                   {
                         /* chamada de funcao: eh_par(num) */
+                        Rotina *r = buscarRotina(idx);
+                        if (r == NULL)
+                              erroSemantico(linha, "identificador nao e uma funcao");
+                        if (!r->ehFuncao)
+                              erroSemantico(linha, "procedimento nao pode ser usado em expressao");
+
                         consumir(TOKEN_ABRE_PAR);
-                        argumentos();
+                        int numArgs = argumentos();
                         consumir(TOKEN_FECHA_PAR);
+                        gerarChamada(r, numArgs, linha);
+                        emitirNome("CRVL", nomeDoSimbolo(r->nome));
                   }
                   else emitirNome("CRVL", nomeDoSimbolo(idx));
                   break;
@@ -1389,9 +1505,12 @@ void fator(void)
 void programa(void)
 {
       emitir("INPP");
+      int rotuloPrincipal = proximo_rotulo();
+      emitirDesvio("DSVS", rotuloPrincipal);
       consumir(TOKEN_ALGORITMO);
       consumir(TOKEN_STRING);
       declaracoes();
+      emitirRotulo(rotuloPrincipal);
       emitirInteiro("AMEM", totalPosicoes);
       consumir(TOKEN_INICIO);
       comandos();
@@ -1500,8 +1619,9 @@ int tipo(void)
  * ------------------------------------------------------------
  * Os quatro tipos primitivos do MiniVisualg.
  */
-void tipo_basico(void)
+TokenNome tipo_basico(void)
 {
+      TokenNome tipoLido = lookahead.type;
       switch (lookahead.type)
       {
             case TOKEN_INTEIRO:
@@ -1513,6 +1633,7 @@ void tipo_basico(void)
             default:
                   erroSintatico(lookahead, "tipo (inteiro, real, caractere ou logico)");
       }
+      return tipoLido;
 }
 
 /*
@@ -1608,6 +1729,7 @@ void cmd_escreva(void)
 void cmd_id(void)
 {
       int idx = lookahead.attribute.table_index;
+      int linha = lookahead.line;
       consumir(TOKEN_ID);
       if (lookahead.type == TOKEN_ATRIB)
       {
@@ -1625,11 +1747,27 @@ void cmd_id(void)
       }
       else if (lookahead.type == TOKEN_ABRE_PAR)
       {
+            Rotina *r = buscarRotina(idx);
+            if (r == NULL)
+                  erroSemantico(linha, "identificador nao e um procedimento");
+            if (r->ehFuncao)
+                  erroSemantico(linha, "funcao nao pode ser usada como procedimento");
+
             consumir(TOKEN_ABRE_PAR);
-            argumentos();
+            int numArgs = argumentos();
             consumir(TOKEN_FECHA_PAR);
+            gerarChamada(r, numArgs, linha);
       }
-      /* senao: producao vazia, chamada de procedimento sem parametros */
+      else
+      {
+            Rotina *r = buscarRotina(idx);
+            if (r == NULL)
+                  erroSemantico(linha, "identificador nao e um procedimento");
+            if (r->ehFuncao)
+                  erroSemantico(linha, "funcao nao pode ser usada como procedimento");
+
+            gerarChamada(r, 0, linha);
+      }
 }
 
 /*
@@ -1708,19 +1846,65 @@ void cmd_se(void)
  */
 void cmd_para(void)
 {
+      int rotuloInicio = proximo_rotulo();
+      int rotuloFim = proximo_rotulo();
+
       consumir(TOKEN_PARA);
+      int idx = lookahead.attribute.table_index;
       consumir(TOKEN_ID);
+
       consumir(TOKEN_DE);
       expr();
+      emitirNome("ARMZ", nomeDoSimbolo(idx));
+
       consumir(TOKEN_ATE);
+      emitirRotulo(rotuloInicio);
+      emitirNome("CRVL", nomeDoSimbolo(idx));
       expr();
+
+      int passo = 1;
       if (lookahead.type == TOKEN_PASSO)
       {
             consumir(TOKEN_PASSO);
-            expr();
+            int linhaPasso = lookahead.line;
+
+            int negativo = 0;
+            if (lookahead.type == TOKEN_SUB)
+            {
+                  consumir(TOKEN_SUB);
+                  negativo = 1;
+            }
+
+            if (lookahead.type != TOKEN_NUM_INT)
+                  erroSemantico(linhaPasso, "passo do para deve ser uma constante inteira");
+
+            passo = lookahead.attribute.int_value;
+            consumir(TOKEN_NUM_INT);
+
+            if (negativo)
+                  passo = -passo;
+
+            if (passo == 0)
+                  erroSemantico(linhaPasso, "passo do para nao pode ser zero");
       }
+
+      if (passo > 0)
+            emitir("CMEG");
+      else
+            emitir("CMAG");
+      emitirDesvio("DSVF", rotuloFim);
+
       consumir(TOKEN_FACA);
       comandos();
+
+      emitirNome("CRVL", nomeDoSimbolo(idx));
+      emitirInteiro("CRCT", passo);
+      emitir("SOMA");
+      emitirNome("ARMZ", nomeDoSimbolo(idx));
+
+      emitirDesvio("DSVS", rotuloInicio);
+      emitirRotulo(rotuloFim);
+
       consumir(TOKEN_FIMPARA);
 }
 
@@ -1753,8 +1937,15 @@ void cmd_enquanto(void)
  */
 void cmd_retorne(void)
 {
+      int linha = lookahead.line;
       consumir(TOKEN_RETORNE);
+
+      if (rotinaAtual == NULL || !rotinaAtual->ehFuncao)
+            erroSemantico(linha, "retorne so pode ser usado dentro de uma funcao");
+
       expr();
+      emitirNome("ARMZ", nomeDoSimbolo(rotinaAtual->nome));
+      emitirDoisInteiros("RTPR", 1, 0);
 }
 
 /*
@@ -1767,15 +1958,28 @@ void cmd_retorne(void)
 void procedimento(void)
 {
       consumir(TOKEN_PROCEDIMENTO);
+      int idx = lookahead.attribute.table_index;
       consumir(TOKEN_ID);
+
+      Rotina *r = inserirRotina(idx, 0);
+      r->rotulo = proximo_rotulo();
+      rotinaAtual = r;
+
+      emitirRotulo(r->rotulo);
+      emitirInteiro("ENPR", 1);
+
       if (lookahead.type == TOKEN_ABRE_PAR)
       {
             consumir(TOKEN_ABRE_PAR);
-            parametros();
+            parametros(r);
             consumir(TOKEN_FECHA_PAR);
       }
       consumir(TOKEN_INICIO);
       comandos();
+
+      emitirDoisInteiros("RTPR", 1, 0);
+      rotinaAtual = NULL;
+
       consumir(TOKEN_FIMPROCEDIMENTO);
 }
 
@@ -1789,14 +1993,30 @@ void procedimento(void)
 void funcao(void)
 {
       consumir(TOKEN_FUNCAO);
+      int idx = lookahead.attribute.table_index;
       consumir(TOKEN_ID);
+
+      Rotina *r = inserirRotina(idx, 1);
+      r->rotulo = proximo_rotulo();
+      rotinaAtual = r;
+
+      totalPosicoes++;
+
+      emitirRotulo(r->rotulo);
+      emitirInteiro("ENPR", 1);
+
       consumir(TOKEN_ABRE_PAR);
-      parametros();
+      parametros(r);
       consumir(TOKEN_FECHA_PAR);
       consumir(TOKEN_DOIS_PONTOS);
-      tipo_basico();
+      r->tipoRetorno = tipo_basico();
+
       consumir(TOKEN_INICIO);
       comandos();
+
+      emitirDoisInteiros("RTPR", 1, 0);
+      rotinaAtual = NULL;
+
       consumir(TOKEN_FIMFUNCAO);
 }
 
@@ -1805,26 +2025,28 @@ void funcao(void)
  * ------------------------------------------------------------
  * Lista de parametros formais separados por virgula.
  */
-void parametros(void)
+void parametros(Rotina *r)
 {
-      parametro();
+      parametro(r);
       while (lookahead.type == TOKEN_VIRGULA)
       {
             consumir(TOKEN_VIRGULA);
-            parametro();
+            parametro(r);
       }
 }
-
 /*
  * parametro -> ID ":" tipo_basico
  * ------------------------------------------------------------
  * Um parametro formal, como "a: inteiro".
  */
-void parametro(void)
+void parametro(Rotina *r)
 {
+      int idx = lookahead.attribute.table_index;
       consumir(TOKEN_ID);
       consumir(TOKEN_DOIS_PONTOS);
-      tipo_basico();
+      TokenNome tipoParam = tipo_basico();
+      adicionarParametro(r, idx, tipoParam);
+      totalPosicoes++;
 }
 
 /* ============================================================

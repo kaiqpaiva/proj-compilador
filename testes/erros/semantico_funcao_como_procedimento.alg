@@ -1,0 +1,8 @@
+algoritmo "FuncaoComoProc"
+funcao f(a: inteiro): inteiro
+inicio
+retorne a
+fimfuncao
+inicio
+f(1)
+fimalgoritmo
