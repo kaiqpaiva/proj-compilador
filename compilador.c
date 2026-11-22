@@ -232,6 +232,18 @@ static const char *nomesOpRel[] = {
 _Static_assert(sizeof(nomesOpRel) / sizeof(nomesOpRel[0]) == OP_TOTAL,
                "nomesOpRel dessincronizado com o enum OpRelType");
 
+static const char *instrucoesOpRel[] = {
+      [OP_LT] = "CMME",
+      [OP_LE] = "CMEG",
+      [OP_EQ] = "CMIG",
+      [OP_GT] = "CMMA",
+      [OP_GE] = "CMAG",
+      [OP_NE] = "CMDG"
+};
+
+_Static_assert(sizeof(instrucoesOpRel) / sizeof(instrucoesOpRel[0]) == OP_TOTAL,
+               "instrucoesOpRel dessincronizado com o enum OpRelType");
+
 /*
  * Estrutura do token com a union de atributos (Figura 2).
  *
@@ -446,6 +458,13 @@ const char *nomeDoOpRel(OpRelType op)
       if ((int)op < 0 || op >= OP_TOTAL || nomesOpRel[op] == NULL)
             return "DESCONHECIDO";
       return nomesOpRel[op];
+}
+
+const char *instrucaoDoOpRel(OpRelType op)
+{
+      if ((int)op < 0 || op >= OP_TOTAL || instrucoesOpRel[op] == NULL)
+            return "DESCONHECIDO";
+      return instrucoesOpRel[op];
 }
 
 /*
@@ -1181,6 +1200,7 @@ void expr(void)
       {
             consumir(TOKEN_OU);
             expr_e();
+            emitir("DISJ");
       }
 }
 
@@ -1196,6 +1216,7 @@ void expr_e(void)
       {
             consumir(TOKEN_E);
             expr_rel();
+            emitir("CONJ");
       }
 }
 
@@ -1211,10 +1232,13 @@ void expr_e(void)
 void expr_rel(void)
 {
       expr_arit();
+      OpRelType op;
       if (lookahead.type == TOKEN_OP_REL)
       {
+            op = lookahead.attribute.op_code;
             consumir(TOKEN_OP_REL);
             expr_arit();
+            emitir(instrucaoDoOpRel(op));
       }
 }
 
@@ -1227,10 +1251,24 @@ void expr_rel(void)
 void expr_arit(void)
 {
       termo();
+      TokenNome op;
       while (lookahead.type == TOKEN_SOMA || lookahead.type == TOKEN_SUB)
       {
+            op = lookahead.type;
             nextToken();
             termo();
+
+            switch (op)
+            {
+                  case TOKEN_SOMA:
+                        emitir("SOMA");
+                        break;
+                  case TOKEN_SUB:
+                        emitir("SUBT");
+                        break;
+                  default:
+                        break;
+            }
       }
 }
 
@@ -1243,11 +1281,30 @@ void expr_arit(void)
 void termo(void)
 {
       fator();
+      TokenNome op;
       while (lookahead.type == TOKEN_MULT || lookahead.type == TOKEN_DIV
              || lookahead.type == TOKEN_DIV_INT || lookahead.type == TOKEN_MOD)
       {
+            op = lookahead.type;
             nextToken();
             fator();
+            switch (op)
+            {
+                  case TOKEN_MULT:
+                        emitir("MULT");
+                        break;
+                  case TOKEN_DIV:
+                        emitir("DIVF");
+                        break;
+                  case TOKEN_DIV_INT:
+                        emitir("DIVI");
+                        break;
+                  case TOKEN_MOD:
+                        /* MEPA nao tem instrucao de resto */
+                        break;
+                  default:
+                        break;
+            }
       }
 }
 
@@ -1268,15 +1325,29 @@ void fator(void)
       switch (lookahead.type)
       {
             case TOKEN_NUM_INT:
+                  emitirInteiro("CRCT", lookahead.attribute.int_value);
+                  nextToken();
+                  break;
             case TOKEN_NUM_FLOAT:
+                  emitirReal("CRCT", lookahead.attribute.float_value);
+                  nextToken();
+                  break;
             case TOKEN_STRING:
+                  // MEPA não tem instrução de texto
+                  nextToken();
+                  break;
             case TOKEN_VERDADEIRO:
+                  emitirInteiro("CRCT", 1);
+                  nextToken();
+                  break;
             case TOKEN_FALSO:
+                  emitirInteiro("CRCT", 0);
                   nextToken();
                   break;
             case TOKEN_SUB:
                   consumir(TOKEN_SUB);
                   fator();
+                  emitir("INVR");
                   break;
             case TOKEN_ABRE_PAR:
                   consumir(TOKEN_ABRE_PAR);
@@ -1284,6 +1355,8 @@ void fator(void)
                   consumir(TOKEN_FECHA_PAR);
                   break;
             case TOKEN_ID:
+            {
+                  int idx = lookahead.attribute.table_index;
                   consumir(TOKEN_ID);
                   if (lookahead.type == TOKEN_ABRE_COL)
                   {
@@ -1299,7 +1372,9 @@ void fator(void)
                         argumentos();
                         consumir(TOKEN_FECHA_PAR);
                   }
+                  else emitirNome("CRVL", nomeDoSimbolo(idx));
                   break;
+            }
             default:
                   erroSintatico(lookahead, "expressao");
       }
@@ -1521,11 +1596,13 @@ void cmd_escreva(void)
  */
 void cmd_id(void)
 {
+      int idx = lookahead.attribute.table_index;
       consumir(TOKEN_ID);
       if (lookahead.type == TOKEN_ATRIB)
       {
             consumir(TOKEN_ATRIB);
             expr();
+            emitirNome("ARMZ", nomeDoSimbolo(idx));
       }
       else if (lookahead.type == TOKEN_ABRE_COL)
       {

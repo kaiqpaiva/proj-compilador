@@ -2,5 +2,6 @@ compilador
 compilador.exe
 *.o
 saida_tokens.txt
+saida_mepa.txt
 .vscode/
 *.dSYM/
