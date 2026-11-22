@@ -54,6 +54,7 @@
 #include <ctype.h>
 
 #define ARQUIVO_SAIDA   "saida_tokens.txt"
+#define ARQUIVO_MEPA    "saida_mepa.txt"
 #define MAX_LEXEMA      256     /* tamanho maximo de um lexema, com o '\0' */
 #define MAX_SIMBOLOS    512     /* entradas da tabela de simbolos          */
 #define MAX_LINHA_SAIDA 64      /* tamanho da linha formatada de um token  */
@@ -305,6 +306,7 @@ static char *buffer = NULL;         /* codigo fonte inteiro em memoria */
 static int posicao = 0;             /* posicao atual no buffer         */
 static int linhaAtual = 1;          /* linha atual do fonte            */
 static FILE *arquivoSaida = NULL;   /* saida_tokens.txt                */
+static FILE *arquivoMepa = NULL;
 
 static Token lookahead;             /* token atual visto pelo parser   */
 
@@ -312,6 +314,12 @@ static Token lookahead;             /* token atual visto pelo parser   */
  * de cadeias. O atributo table_index do token e o indice aqui dentro. */
 static char tabelaSimbolos[MAX_SIMBOLOS][MAX_LEXEMA];
 static int totalSimbolos = 0;
+
+/* Quantidade de posicoes de memoria ocupadas pelas variaveis do
+ * programa (um vetor conta o seu tamanho). E o valor do AMEM. */
+static int totalPosicoes = 0;
+
+void encerrarComErro(void);
 
 /* ============================================================
  *  3. FUNCOES AUXILIARES
@@ -350,8 +358,18 @@ int carregarArquivo(const char *nomeArquivo)
             return 0;
       }
 
-      fread(buffer, 1, tamanho, arquivo);
+      size_t lidos = fread(buffer, 1, tamanho, arquivo);
+
+      if (lidos != (size_t)tamanho)
+      {
+            free(buffer);
+            buffer = NULL;
+            fclose(arquivo);
+            return 0;
+      }
+
       buffer[tamanho] = '\0';
+
       fclose(arquivo);
       return 1;
 }
@@ -388,9 +406,8 @@ int inserirSimbolo(const char *lexema)
                   fprintf(arquivoSaida,
                           "ERRO: tabela de simbolos cheia (limite de %d entradas)\n",
                           MAX_SIMBOLOS);
-                  fclose(arquivoSaida);
             }
-            exit(1);
+            encerrarComErro();
       }
 
       strncpy(tabelaSimbolos[totalSimbolos], lexema, MAX_LEXEMA - 1);
@@ -539,6 +556,21 @@ int igualSemCaixa(const char *a, const char *b)
  *  testes de erro.
  * ============================================================ */
 
+ void encerrarComErro(void)
+{
+      if (arquivoSaida != NULL)
+            fclose(arquivoSaida);
+
+      if (arquivoMepa != NULL)
+      {
+            fclose(arquivoMepa);
+            remove(ARQUIVO_MEPA);
+      }
+
+      free(buffer);
+      exit(1);
+}
+
 /*
  * erroSintatico
  * ------------------------------------------------------------
@@ -554,8 +586,7 @@ void erroSintatico(Token token, const char *esperado)
              token.line, esperado, nomeDoToken(token.type));
       fprintf(arquivoSaida, "%d# ERRO SINTATICO: esperado %s, encontrado %s\n",
               token.line, esperado, nomeDoToken(token.type));
-      fclose(arquivoSaida);
-      exit(1);
+      encerrarComErro();
 }
 
 /*
@@ -571,8 +602,7 @@ void erroLexico(int linha, const char *sequencia)
 {
       printf("%d# ERRO LEXICO: '%s'\n", linha, sequencia);
       fprintf(arquivoSaida, "%d# ERRO LEXICO: '%s'\n", linha, sequencia);
-      fclose(arquivoSaida);
-      exit(1);
+      encerrarComErro();
 }
 
 /* ============================================================
@@ -968,6 +998,51 @@ Token obterToken(void)
 }
 
 /* ============================================================
+ *  GERACAO DE CODIGO MEPA  -  Fase 2
+ * ============================================================ */
+
+void emitir(const char *instr)
+{
+      fprintf(arquivoMepa, "    %s\n", instr);
+}
+
+void emitirNome(const char *instr, const char *nome)
+{
+      fprintf(arquivoMepa, "    %s %s\n", instr, nome);
+}
+
+void emitirInteiro(const char *instr, int valor)
+{
+      fprintf(arquivoMepa, "    %s %d\n", instr, valor);
+}
+
+void emitirReal(const char *instr, double valor)
+{
+      fprintf(arquivoMepa, "    %s %g\n", instr, valor);
+}
+
+void emitirDesvio(const char *instr, int rotulo)
+{
+      fprintf(arquivoMepa, "    %s L%d\n", instr, rotulo);
+}
+
+void emitirRotulo(int rotulo)
+{
+      fprintf(arquivoMepa, "L%d: NADA\n", rotulo);
+}
+
+int proximo_rotulo(void)
+{
+      static int contadorRotulos = 0;
+      return ++contadorRotulos;
+}
+
+const char *nomeDoSimbolo(int indice)
+{
+      return tabelaSimbolos[indice];
+}
+
+/* ============================================================
  *  6. ANALISADOR SINTATICO (PARSER)  -  Etapa 3
  * ============================================================
  *  Analise descendente recursiva: cada nao-terminal da gramatica vira
@@ -1052,8 +1127,8 @@ void programa(void);
 void declaracoes(void);
 void secao_var(void);
 void decl_var(void);
-void lista_ids(void);
-void tipo(void);
+int lista_ids(void);
+int tipo(void);
 void tipo_basico(void);
 void procedimento(void);
 void funcao(void);
@@ -1238,12 +1313,15 @@ void fator(void)
  */
 void programa(void)
 {
+      emitir("INPP");
       consumir(TOKEN_ALGORITMO);
       consumir(TOKEN_STRING);
       declaracoes();
+      emitirInteiro("AMEM", totalPosicoes);
       consumir(TOKEN_INICIO);
       comandos();
       consumir(TOKEN_FIMALGORITMO);
+      emitir("PARA");
 }
 
 /*
@@ -1289,9 +1367,11 @@ void secao_var(void)
  */
 void decl_var(void)
 {
-      lista_ids();
+      int contagem_ids = lista_ids();
       consumir(TOKEN_DOIS_PONTOS);
-      tipo();
+      int posicoes = tipo();
+
+      totalPosicoes += contagem_ids * posicoes;
 }
 
 /*
@@ -1299,14 +1379,18 @@ void decl_var(void)
  * ------------------------------------------------------------
  * Um ou mais identificadores separados por virgula.
  */
-void lista_ids(void)
+int lista_ids(void)
 {
+      int contagem_ids = 1;
       consumir(TOKEN_ID);
       while (lookahead.type == TOKEN_VIRGULA)
       {
             consumir(TOKEN_VIRGULA);
             consumir(TOKEN_ID);
+            contagem_ids++;
       }
+
+      return contagem_ids;
 }
 
 /*
@@ -1316,19 +1400,24 @@ void lista_ids(void)
  * termina num tipo basico, entao a chamada final e comum as duas
  * producoes.
  */
-void tipo(void)
+int tipo(void)
 {
+      int num_posicoes = 1;
       if (lookahead.type == TOKEN_VETOR)
       {
             consumir(TOKEN_VETOR);
             consumir(TOKEN_ABRE_COL);
+            int inicio = lookahead.attribute.int_value;
             consumir(TOKEN_NUM_INT);
             consumir(TOKEN_PONTO_PONTO);
+            int fim = lookahead.attribute.int_value;
             consumir(TOKEN_NUM_INT);
             consumir(TOKEN_FECHA_COL);
             consumir(TOKEN_DE);
+            num_posicoes = fim - inicio + 1;
       }
       tipo_basico();
+      return num_posicoes;
 }
 
 /*
@@ -1670,6 +1759,14 @@ int main(int argc, char *argv[])
             return 1;
       }
 
+      arquivoMepa = fopen(ARQUIVO_MEPA, "w");
+      if (arquivoMepa == NULL)
+      {
+            printf("Erro ao criar %s \n", ARQUIVO_MEPA);
+            free(buffer);
+            return 1;
+      }
+
       /* Etapas 2 e 3 juntas: o parser pede os tokens ao lexico, que
        * imprime cada um deles enquanto a analise acontece. */
       nextToken();
@@ -1682,6 +1779,7 @@ int main(int argc, char *argv[])
       fprintf(arquivoSaida, "Analise sintatica concluida sem erros.\n");
 
       fclose(arquivoSaida);
+      fclose(arquivoMepa);
       free(buffer);
       return 0;
 }
