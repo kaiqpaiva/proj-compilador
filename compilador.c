@@ -1,34 +1,48 @@
 /*
  * ============================================================
- *  COMPILADORES - PROJETO FASE 1
- *  Analisador Lexico e Sintatico da linguagem MiniVisualg
+ *  COMPILADORES - PROJETO FASE 2
+ *  Compilador da linguagem MiniVisualg: analise lexica,
+ *  sintatica e semantica, e geracao de codigo MEPA
  * ============================================================
  *  Integrantes:
  *    Caio Ariel Cardoso Saraiva  - RA: 10439611
  *    Isabela Hissa Pinto         - RA: 10441873
  *    Kaique Barros Paiva         - RA: 10441787
  *
- *  Compilar:
- *    gcc -Wall -Wno-unused-result -g -Og compilador.c -o compilador
+ *  Compilar (comando do enunciado, sem warnings):
+ *    gcc -g -Og -Wall compilador.c -o compilador
  *
  *  Executar:
- *    ./compilador testes/validos/01_primeiro_passo.alg
+ *    ./compilador testes/validos/15_rotinas.alg
  *
- *  Saida: tokens e resultado da analise sintatica na tela e no
- *  arquivo saida_tokens.txt
+ *  Saidas:
+ *    saida_tokens.txt .. tokens e resultado da analise (tambem na tela)
+ *    saida_mepa.txt .... codigo MEPA gerado (Fase 2). Em qualquer erro
+ *                        o arquivo e apagado, para nunca sobrar um
+ *                        codigo incompleto que pareca valido.
+ *
+ *  O uso de ferramentas de IA no desenvolvimento esta descrito no
+ *  README (secao "Uso de Inteligencia Artificial").
  * ------------------------------------------------------------
  *  ORGANIZACAO DO ARQUIVO
  *
  *    1. Definicao dos tokens .... enum TokenNome, OpRelType,
- *                                 struct Token e tabelas de nomes
+ *                                 struct Token, struct Rotina e
+ *                                 tabelas de nomes e de instrucoes
  *    2. Estado global ........... buffer do fonte, posicao, linha,
- *                                 lookahead e tabela de simbolos
+ *                                 lookahead, tabela de simbolos,
+ *                                 tabela de rotinas e arquivos
  *    3. Funcoes auxiliares ...... leitura do arquivo, tabela de
- *                                 simbolos e formatacao da saida
- *    4. Tratamento de erros ..... erroLexico e erroSintatico
+ *                                 simbolos, tabela de rotinas e
+ *                                 formatacao da saida
+ *    4. Tratamento de erros ..... erros lexico, sintatico e semantico
+ *                                 e recursos nao suportados
  *    5. Analisador lexico ....... Etapa 2 (obterToken)
- *    6. Analisador sintatico .... Etapa 3 (nextToken e a gramatica)
- *    7. main .................... liga tudo
+ *    6. Geracao de codigo ....... funcoes de emissao MEPA, rotulos e
+ *                                 montagem de chamadas
+ *    7. Analisador sintatico .... Etapa 3 (nextToken e a gramatica),
+ *                                 que tambem dirige a geracao de codigo
+ *    8. main .................... liga tudo
  *
  *  FLUXO DE EXECUCAO (Figura 1 do enunciado)
  *
@@ -42,9 +56,17 @@
  *                               |
  *                               +-> imprimirToken -> infoToken
  *
- *  O programa termina com codigo 0 quando a analise vai ate o fim
- *  sem erros, e com codigo 1 em qualquer erro (de abertura de
- *  arquivo, lexico ou sintatico).
+ *    Na Fase 2 a geracao de codigo e dirigida pela sintaxe: cada funcao
+ *    do parser, ao reconhecer uma construcao, emite as instrucoes MEPA
+ *    correspondentes no saida_mepa.txt. Nao ha arvore intermediaria nem
+ *    segunda passada sobre o fonte.
+ *
+ *      cmd_se -> expr -> ... -> fator -> emitir("CRVL", ...)
+ *             -> emitirDesvio("DSVF", ...) -> comandos -> ...
+ *
+ *  O programa termina com codigo 0 quando a compilacao vai ate o fim
+ *  sem erros, e com codigo 1 em qualquer erro (de abertura de arquivo,
+ *  lexico, sintatico, semantico ou de recurso nao suportado).
  * ============================================================
  */
 
@@ -234,6 +256,9 @@ static const char *nomesOpRel[] = {
 _Static_assert(sizeof(nomesOpRel) / sizeof(nomesOpRel[0]) == OP_TOTAL,
                "nomesOpRel dessincronizado com o enum OpRelType");
 
+/* Instrucao MEPA de comparacao para cada operador relacional, usada
+ * pela geracao de codigo em expr_rel. Indexada pelo proprio enum, como
+ * nomesOpRel; o assert abaixo acusa na compilacao se faltar alguma. */
 static const char *instrucoesOpRel[] = {
       [OP_LT] = "CMME",
       [OP_LE] = "CMEG",
@@ -352,16 +377,21 @@ static Token lookahead;             /* token atual visto pelo parser   */
 static char tabelaSimbolos[MAX_SIMBOLOS][MAX_LEXEMA];
 static int totalSimbolos = 0;
 
-/* Quantidade de posicoes de memoria ocupadas pelas variaveis do
- * programa (um vetor conta o seu tamanho). E o valor do AMEM. */
+/* Quantidade de posicoes de memoria reservadas pelo AMEM: cada variavel
+ * simples ocupa 1, um vetor ocupa o seu tamanho, cada parametro de
+ * rotina ocupa 1 e cada funcao ocupa mais 1 para o valor de retorno. */
 static int totalPosicoes = 0;
 
 /* Tabela de rotinas (procedimentos e funcoes), na ordem de declaracao. */
 static Rotina tabelaRotinas[MAX_ROTINAS];
 static int totalRotinas = 0;
 
+/* Rotina cujo corpo esta sendo analisado (NULL no programa principal).
+ * Usada por cmd_retorne para saber em qual funcao guardar o valor. */
 static Rotina *rotinaAtual = NULL;
 
+/* Prototipo: encerrarComErro e definida na secao 4, mas e usada antes
+ * dela pelas funcoes de tabela da secao 3. */
 void encerrarComErro(void);
 
 /* ============================================================
@@ -458,6 +488,19 @@ int inserirSimbolo(const char *lexema)
       return totalSimbolos++;
 }
 
+/*
+ * inserirRotina
+ * ------------------------------------------------------------
+ * Registra um procedimento ou uma funcao na tabela de rotinas. E chamada
+ * na declaracao, antes do corpo, para que o nome ja seja conhecido se o
+ * corpo chamar a propria rotina. O rotulo e o tipo de retorno sao
+ * preenchidos depois, por quem chamou.
+ *
+ * Parametros: nome     - indice do nome na tabelaSimbolos
+ *             ehFuncao - 1 para funcao, 0 para procedimento
+ * Retorno:    ponteiro para a rotina criada, para o parser completar os
+ *             campos e acrescentar os parametros.
+ */
 Rotina *inserirRotina(int nome, int ehFuncao)
 {
       if (totalRotinas >= MAX_ROTINAS)
@@ -480,6 +523,17 @@ Rotina *inserirRotina(int nome, int ehFuncao)
       return r;
 }
 
+/*
+ * adicionarParametro
+ * ------------------------------------------------------------
+ * Acrescenta um parametro formal ao fim da lista da rotina, preservando
+ * a ordem da declaracao (a chamada depende dessa ordem para casar cada
+ * argumento com o seu parametro).
+ *
+ * Parametros: r    - rotina que recebe o parametro
+ *             nome - indice do nome do parametro na tabelaSimbolos
+ *             tipo - tipo declarado (TOKEN_INTEIRO, TOKEN_REAL, ...)
+ */
 void adicionarParametro(Rotina *r, int nome, TokenNome tipo)
 {
       if (r->numParams >= MAX_PARAMS)
@@ -498,6 +552,16 @@ void adicionarParametro(Rotina *r, int nome, TokenNome tipo)
       r->numParams++;
 }
 
+/*
+ * buscarRotina
+ * ------------------------------------------------------------
+ * Procura uma rotina pelo indice do nome. Comparar indices basta porque
+ * o lexico sempre devolve o mesmo indice para o mesmo lexema.
+ *
+ * Parametro: nome - indice do nome na tabelaSimbolos
+ * Retorno:   ponteiro para a rotina, ou NULL se o identificador nao for
+ *            um procedimento nem uma funcao declarados.
+ */
 Rotina *buscarRotina(int nome)
 {
       for (int i = 0; i < totalRotinas; i++)
@@ -541,6 +605,16 @@ const char *nomeDoOpRel(OpRelType op)
       return nomesOpRel[op];
 }
 
+/*
+ * instrucaoDoOpRel
+ * ------------------------------------------------------------
+ * Traduz um operador relacional para a instrucao MEPA de comparacao
+ * (OP_LT -> CMME, OP_GE -> CMAG, ...). Mesma protecao de faixa de
+ * nomeDoOpRel.
+ *
+ * Parametro: op - valor do enum OpRelType
+ * Retorno:   nome da instrucao, ou "DESCONHECIDO" fora da faixa.
+ */
 const char *instrucaoDoOpRel(OpRelType op)
 {
       if ((int)op < 0 || op >= OP_TOTAL || instrucoesOpRel[op] == NULL)
@@ -649,14 +723,25 @@ int igualSemCaixa(const char *a, const char *b)
 /* ============================================================
  *  4. TRATAMENTO DE ERROS
  * ============================================================
- *  As duas funcoes seguem o que o enunciado pede: mostram a mensagem
- *  com a linha do fonte e encerram todo o processo. Antes do exit o
- *  arquivo de saida e fechado, senao os tokens ja escritos ficariam
- *  presos no buffer do stdio e o arquivo sairia vazio justamente nos
- *  testes de erro.
+ *  Todas as funcoes de erro seguem o que o enunciado pede: mostram a
+ *  mensagem com a linha do fonte e encerram todo o processo. O
+ *  encerramento passa sempre por encerrarComErro, que fecha os arquivos
+ *  (senao os tokens ja escritos ficariam presos no buffer do stdio e o
+ *  arquivo sairia vazio justamente nos testes de erro) e apaga o
+ *  saida_mepa.txt incompleto.
  * ============================================================ */
 
- void encerrarComErro(void)
+/*
+ * encerrarComErro
+ * ------------------------------------------------------------
+ * Ponto unico de saida em caso de erro: fecha o saida_tokens.txt,
+ * fecha e apaga o saida_mepa.txt (um codigo MEPA pela metade pareceria
+ * valido), libera o buffer do fonte e termina com codigo 1.
+ *
+ * Os testes de NULL cobrem erros que acontecem antes de os dois
+ * arquivos estarem abertos.
+ */
+void encerrarComErro(void)
 {
       if (arquivoSaida != NULL)
             fclose(arquivoSaida);
@@ -705,10 +790,40 @@ void erroLexico(int linha, const char *sequencia)
       encerrarComErro();
 }
 
-void erroSemantico(int linha, const char *sequencia)
+/*
+ * erroSemantico
+ * ------------------------------------------------------------
+ * Relata uma construcao sintaticamente correta mas sem sentido para a
+ * linguagem (ex.: procedimento usado em expressao) e encerra o programa
+ * com codigo 1. Mesmo formato dos erros lexico e sintatico.
+ *
+ * Parametros: linha    - linha do fonte onde o erro foi localizado
+ *             mensagem - descricao do erro
+ */
+void erroSemantico(int linha, const char *mensagem)
 {
-      printf("%d# ERRO SEMANTICO: '%s'\n", linha, sequencia);
-      fprintf(arquivoSaida, "%d# ERRO SEMANTICO: '%s'\n", linha, sequencia);
+      printf("%d# ERRO SEMANTICO: %s\n", linha, mensagem);
+      fprintf(arquivoSaida, "%d# ERRO SEMANTICO: %s\n", linha, mensagem);
+      encerrarComErro();
+}
+
+/*
+ * naoSuportado
+ * ------------------------------------------------------------
+ * Encerra a compilacao quando o programa usa um recurso que a geracao
+ * de codigo MEPA nao implementa (vetores e o operador mod; ver o
+ * README, secao "Limitacoes conhecidas"). O programa do usuario esta correto: a limitacao e do
+ * compilador. Por isso a mensagem e diferente do erro semantico, e o
+ * saida_mepa.txt incompleto e apagado, como nos outros erros.
+ *
+ * Parametros: linha   - linha do fonte onde o recurso aparece
+ *             recurso - descricao do recurso, como "vetores"
+ */
+void naoSuportado(int linha, const char *recurso)
+{
+      printf("%d# NAO SUPORTADO: geracao de codigo para %s\n", linha, recurso);
+      fprintf(arquivoSaida, "%d# NAO SUPORTADO: geracao de codigo para %s\n",
+              linha, recurso);
       encerrarComErro();
 }
 
@@ -1105,55 +1220,181 @@ Token obterToken(void)
 }
 
 /* ============================================================
- *  GERACAO DE CODIGO MEPA  -  Fase 2
+ *  6. GERACAO DE CODIGO MEPA  -  Fase 2
+ * ============================================================
+ *  A geracao e dirigida pela sintaxe: as funcoes do parser (secao 7)
+ *  chamam as funcoes desta secao no momento em que reconhecem cada
+ *  construcao, e o codigo sai direto no saida_mepa.txt.
+ *
+ *  As funcoes de emissao sabem COMO escrever uma linha; o parser decide
+ *  QUANDO e O QUE escrever. Ha uma funcao por formato de operando:
+ *
+ *    emitir .............. sem operando ......... SOMA, INPP, IMPR
+ *    emitirNome .......... nome de variavel ..... CRVL idade
+ *    emitirInteiro ....... inteiro .............. CRCT 4, AMEM 3
+ *    emitirDoisInteiros .. dois inteiros ........ RTPR 1,0
+ *    emitirReal .......... real ................. CRCT 1.6
+ *    emitirDesvio ........ rotulo usado ......... DSVF L3, CHPR L2
+ *    emitirRotulo ........ rotulo definido ...... L3: NADA
+ *
+ *  As instrucoes ficam recuadas com 4 espacos e os rotulos na coluna 0,
+ *  uma instrucao por linha. As variaveis sao referenciadas pelo nome,
+ *  como pede o enunciado.
  * ============================================================ */
 
+/*
+ * emitir
+ * ------------------------------------------------------------
+ * Escreve uma instrucao sem operando.  Exemplo: "    SOMA"
+ *
+ * Parametro: instr - mnemonico da instrucao
+ */
 void emitir(const char *instr)
 {
       fprintf(arquivoMepa, "    %s\n", instr);
 }
 
+/*
+ * emitirNome
+ * ------------------------------------------------------------
+ * Escreve uma instrucao cujo operando e o nome de uma variavel.
+ * Exemplo: "    CRVL idade"
+ *
+ * Parametros: instr - mnemonico da instrucao
+ *             nome  - nome da variavel (ver nomeDoSimbolo)
+ */
 void emitirNome(const char *instr, const char *nome)
 {
       fprintf(arquivoMepa, "    %s %s\n", instr, nome);
 }
 
+/*
+ * emitirInteiro
+ * ------------------------------------------------------------
+ * Escreve uma instrucao com operando inteiro.  Exemplo: "    CRCT 4"
+ *
+ * Parametros: instr - mnemonico da instrucao
+ *             valor - operando
+ */
 void emitirInteiro(const char *instr, int valor)
 {
       fprintf(arquivoMepa, "    %s %d\n", instr, valor);
 }
 
+/*
+ * emitirDoisInteiros
+ * ------------------------------------------------------------
+ * Escreve uma instrucao com dois operandos inteiros separados por
+ * virgula, formato do RTPR k,n.  Exemplo: "    RTPR 1,0"
+ *
+ * Parametros: instr  - mnemonico da instrucao
+ *             valor1 - primeiro operando
+ *             valor2 - segundo operando
+ */
 void emitirDoisInteiros(const char *instr, int valor1, int valor2)
 {
       fprintf(arquivoMepa, "    %s %d,%d\n", instr, valor1, valor2);
 }
 
+/*
+ * emitirReal
+ * ------------------------------------------------------------
+ * Escreve uma instrucao com operando real. O %g evita zeros inuteis
+ * (1.6 em vez de 1.600000).  Exemplo: "    CRCT 1.6"
+ *
+ * Parametros: instr - mnemonico da instrucao
+ *             valor - operando
+ */
 void emitirReal(const char *instr, double valor)
 {
       fprintf(arquivoMepa, "    %s %g\n", instr, valor);
 }
 
+/*
+ * emitirDesvio
+ * ------------------------------------------------------------
+ * Escreve uma instrucao que USA um rotulo (desvios e chamada de
+ * rotina).  Exemplo: "    DSVF L3"
+ *
+ * Parametros: instr  - DSVS, DSVF ou CHPR
+ *             rotulo - numero do rotulo (o "L" e acrescentado aqui)
+ */
 void emitirDesvio(const char *instr, int rotulo)
 {
       fprintf(arquivoMepa, "    %s L%d\n", instr, rotulo);
 }
 
+/*
+ * emitirRotulo
+ * ------------------------------------------------------------
+ * DEFINE um rotulo, marcando a posicao para onde os desvios pulam.
+ * O NADA garante que o rotulo sempre tem uma instrucao, mesmo no fim de
+ * um bloco.  Exemplo: "L3: NADA"
+ *
+ * Parametro: rotulo - numero do rotulo
+ */
 void emitirRotulo(int rotulo)
 {
       fprintf(arquivoMepa, "L%d: NADA\n", rotulo);
 }
 
+/*
+ * proximo_rotulo
+ * ------------------------------------------------------------
+ * Funcao sugerida pelo enunciado: devolve o proximo rotulo consecutivo
+ * positivo (1, 2, 3, ...). O contador e 'static' local, entao so esta
+ * funcao consegue altera-lo.
+ *
+ * Por causa da recursao do parser, cada comando pede os seus rotulos
+ * logo no inicio e guarda em variaveis LOCAIS: assim um comando interno
+ * (um se dentro de outro, por exemplo) pede os proprios rotulos sem
+ * sobrescrever os do comando externo.
+ *
+ * Retorno: numero do novo rotulo.
+ */
 int proximo_rotulo(void)
 {
       static int contadorRotulos = 0;
       return ++contadorRotulos;
 }
 
+/*
+ * nomeDoSimbolo
+ * ------------------------------------------------------------
+ * Devolve o lexema de um identificador a partir do atributo
+ * table_index do token, para ser usado como operando no MEPA.
+ *
+ * Parametro: indice - indice na tabelaSimbolos
+ * Retorno:   o nome (const: quem recebe nao pode alterar a tabela).
+ */
 const char *nomeDoSimbolo(int indice)
 {
       return tabelaSimbolos[indice];
 }
 
+/*
+ * gerarChamada
+ * ------------------------------------------------------------
+ * Gera a parte comum a toda chamada de rotina, depois que o codigo dos
+ * argumentos ja foi emitido (eles estao empilhados, o ultimo no topo):
+ *
+ *    ARMZ ultimo_parametro      <- o ARMZ retira o topo, por isso
+ *    ...                           os parametros sao percorridos do
+ *    ARMZ primeiro_parametro       ultimo para o primeiro
+ *    CHPR Lrotina
+ *
+ * Os parametros sao posicoes de memoria com nome (ver README, decisao
+ * sobre rotinas). Para uma funcao, quem chama emite depois o CRVL com
+ * o nome dela para buscar o resultado.
+ *
+ * A quantidade de argumentos e conferida aqui (parte "numero" da regra
+ * 6 do enunciado) porque, com a quantidade errada, os ARMZ sairiam
+ * descasados.
+ *
+ * Parametros: r       - rotina chamada
+ *             numArgs - quantidade de argumentos da chamada
+ *             linha   - linha da chamada, para a mensagem de erro
+ */
 void gerarChamada(Rotina *r, int numArgs, int linha)
 {
       if (numArgs != r->numParams)
@@ -1166,11 +1407,17 @@ void gerarChamada(Rotina *r, int numArgs, int linha)
 }
 
 /* ============================================================
- *  6. ANALISADOR SINTATICO (PARSER)  -  Etapa 3
+ *  7. ANALISADOR SINTATICO (PARSER)  -  Etapa 3
  * ============================================================
  *  Analise descendente recursiva: cada nao-terminal da gramatica vira
  *  uma funcao, e a escolha da producao e feita olhando um unico token
- *  a frente (o lookahead). A gramatica implementada e:
+ *  a frente (o lookahead). Na Fase 2 as mesmas funcoes fazem as
+ *  verificacoes semanticas e emitem o codigo MEPA (secao 6).
+ *
+ *  Um cuidado aparece em quase todas as funcoes: o atributo de um token
+ *  (indice do nome, valor numerico, operador) e guardado numa variavel
+ *  local ANTES de consumir o token, porque depois do consumo o
+ *  lookahead ja e o token seguinte. A gramatica implementada e:
  *
  *    programa     -> ALGORITMO STRING declaracoes INICIO comandos
  *                    FIMALGORITMO
@@ -1213,7 +1460,9 @@ void gerarChamada(Rotina *r, int numArgs, int linha)
  *
  *  A cadeia expr -> expr_e -> expr_rel -> expr_arit -> termo -> fator
  *  e o que da a precedencia dos operadores: OU e o mais fraco e os
- *  fatores sao os mais fortes.
+ *  fatores sao os mais fortes. A mesma recursao produz o codigo das
+ *  expressoes em ordem pos-fixa: o operador so e emitido depois do
+ *  codigo dos dois operandos.
  * ============================================================ */
 
 /*
@@ -1279,7 +1528,14 @@ void fator(void);
  * argumentos -> expr { "," expr }
  * ------------------------------------------------------------
  * Lista de expressoes separadas por virgula, usada nas chamadas de
- * escreva, escreval, procedimentos e funcoes.
+ * procedimentos e funcoes. O codigo de cada argumento e emitido em
+ * ordem, deixando os valores empilhados para gerarChamada.
+ *
+ * O escreva nao usa esta funcao: ele percorre os proprios argumentos
+ * para emitir um IMPR depois de cada um (ver cmd_escreva).
+ *
+ * Retorno: quantidade de argumentos, conferida com a declaracao da
+ *          rotina em gerarChamada.
  */
 int argumentos(void)
 {
@@ -1299,6 +1555,8 @@ int argumentos(void)
  * ------------------------------------------------------------
  * Nivel mais externo da expressao: o operador logico OU, que tem a
  * menor precedencia da linguagem.
+ *
+ * Codigo gerado: <expr_e> <expr_e> DISJ   (1 = verdadeiro, 0 = falso)
  */
 void expr(void)
 {
@@ -1315,6 +1573,8 @@ void expr(void)
  * expr_e -> expr_rel { E expr_rel }
  * ------------------------------------------------------------
  * Operador logico E, que liga mais forte que o OU.
+ *
+ * Codigo gerado: <expr_rel> <expr_rel> CONJ
  */
 void expr_e(void)
 {
@@ -1335,14 +1595,17 @@ void expr_e(void)
  *
  * Qualquer operador relacional serve aqui, entao basta testar o tipo
  * TOKEN_OP_REL; qual deles era fica no atributo do token.
+ *
+ * Codigo gerado: <expr_arit> <expr_arit> CMxx, com CMxx escolhida pela
+ * tabela instrucoesOpRel. A comparacao deixa 1 ou 0 na pilha.
  */
 void expr_rel(void)
 {
       expr_arit();
-      OpRelType op;
       if (lookahead.type == TOKEN_OP_REL)
       {
-            op = lookahead.attribute.op_code;
+            /* o operador e guardado antes de consumir o token */
+            OpRelType op = lookahead.attribute.op_code;
             consumir(TOKEN_OP_REL);
             expr_arit();
             emitir(instrucaoDoOpRel(op));
@@ -1354,17 +1617,26 @@ void expr_rel(void)
  * ------------------------------------------------------------
  * Soma e subtracao. Como os dois operadores levam ao mesmo lugar, o
  * avanco e feito direto com nextToken em vez de consumir.
+ *
+ * Codigo gerado: <termo> <termo> SOMA | SUBT. O laco emite cada operacao
+ * assim que o segundo operando termina, o que da a associatividade a
+ * esquerda: 10 - 4 - 3 vira (10 - 4) - 3.
+ *
+ * O "default" do switch evita o warning do -Wall para os valores do
+ * enum que nunca chegam aqui.
  */
 void expr_arit(void)
 {
       termo();
-      TokenNome op;
       while (lookahead.type == TOKEN_SOMA || lookahead.type == TOKEN_SUB)
       {
-            op = lookahead.type;
+            /* guarda o operador: depois do nextToken o lookahead ja e o
+             * operando da direita */
+            TokenNome op = lookahead.type;
             nextToken();
             termo();
 
+            /* os dois operandos ja estao na pilha: agora vem a operacao */
             switch (op)
             {
                   case TOKEN_SOMA:
@@ -1384,30 +1656,36 @@ void expr_arit(void)
  * ------------------------------------------------------------
  * Multiplicacao, divisao real, divisao inteira e resto: todos ligam
  * mais forte que soma e subtracao.
+ *
+ * Codigo gerado: <fator> <fator> MULT | DIVF | DIVI. O operador mod
+ * nao e suportado na geracao de codigo e encerra a compilacao.
  */
 void termo(void)
 {
       fator();
-      TokenNome op;
       while (lookahead.type == TOKEN_MULT || lookahead.type == TOKEN_DIV
              || lookahead.type == TOKEN_DIV_INT || lookahead.type == TOKEN_MOD)
       {
-            op = lookahead.type;
+            /* operador e linha guardados antes de avancar */
+            TokenNome op = lookahead.type;
+            int linha = lookahead.line;
             nextToken();
             fator();
+
             switch (op)
             {
                   case TOKEN_MULT:
                         emitir("MULT");
                         break;
                   case TOKEN_DIV:
-                        emitir("DIVF");
+                        emitir("DIVF");   /* no Visualg "/" e sempre divisao real */
                         break;
                   case TOKEN_DIV_INT:
                         emitir("DIVI");
                         break;
                   case TOKEN_MOD:
-                        /* MEPA nao tem instrucao de resto */
+                        /* a MEPA nao tem instrucao de resto (ver README) */
+                        naoSuportado(linha, "o operador mod");
                         break;
                   default:
                         break;
@@ -1426,12 +1704,24 @@ void termo(void)
  *
  * O caso "-" fator e recursivo e cobre o menos unario, como em
  * "passo -2".
+ *
+ * Codigo gerado:
+ *    numero ............ CRCT valor
+ *    verdadeiro/falso .. CRCT 1 / CRCT 0
+ *    variavel .......... CRVL nome
+ *    "-" fator ......... <fator> INVR
+ *    funcao(args) ...... <args> ARMZ params CHPR Lf CRVL funcao
+ *    "texto" ........... nada (tratado pelo escreva)
+ *
+ * Verificacoes semanticas: regra 7 (procedimento nao pode ser usado em
+ * expressao) e quantidade de argumentos, em gerarChamada.
  */
 void fator(void)
 {
       switch (lookahead.type)
       {
             case TOKEN_NUM_INT:
+                  /* o valor e lido antes de avancar para o proximo token */
                   emitirInteiro("CRCT", lookahead.attribute.int_value);
                   nextToken();
                   break;
@@ -1440,7 +1730,8 @@ void fator(void)
                   nextToken();
                   break;
             case TOKEN_STRING:
-                  // MEPA não tem instrução de texto
+                  /* a MEPA nao tem instrucao para texto: a cadeia nao gera
+                   * codigo, e o escreva deixa de emitir o IMPR dela */
                   nextToken();
                   break;
             case TOKEN_VERDADEIRO:
@@ -1452,23 +1743,29 @@ void fator(void)
                   nextToken();
                   break;
             case TOKEN_SUB:
+                  /* menos unario: primeiro o operando, depois o INVR */
                   consumir(TOKEN_SUB);
                   fator();
                   emitir("INVR");
                   break;
             case TOKEN_ABRE_PAR:
+                  /* os parenteses so mudam a ordem das chamadas: nao geram
+                   * instrucao propria */
                   consumir(TOKEN_ABRE_PAR);
                   expr();
                   consumir(TOKEN_FECHA_PAR);
                   break;
             case TOKEN_ID:
             {
+                  /* chaves no case: uma declaracao logo depois de um rotulo
+                   * nao compila em gcc anterior a versao 11 */
                   int idx = lookahead.attribute.table_index;
                   int linha = lookahead.line;
                   consumir(TOKEN_ID);
                   if (lookahead.type == TOKEN_ABRE_COL)
                   {
                         /* acesso a vetor: nomes[2] */
+                        naoSuportado(linha, "vetores");
                         consumir(TOKEN_ABRE_COL);
                         expr();
                         consumir(TOKEN_FECHA_COL);
@@ -1486,9 +1783,15 @@ void fator(void)
                         int numArgs = argumentos();
                         consumir(TOKEN_FECHA_PAR);
                         gerarChamada(r, numArgs, linha);
+
+                        /* o retorno fica na posicao com o nome da funcao */
                         emitirNome("CRVL", nomeDoSimbolo(r->nome));
                   }
-                  else emitirNome("CRVL", nomeDoSimbolo(idx));
+                  else
+                  {
+                        /* variavel simples */
+                        emitirNome("CRVL", nomeDoSimbolo(idx));
+                  }
                   break;
             }
             default:
@@ -1501,6 +1804,20 @@ void fator(void)
  * ------------------------------------------------------------
  * Simbolo inicial da gramatica. O nome do algoritmo vem entre aspas,
  * por isso o segundo token e STRING e nao ID.
+ *
+ * Codigo gerado:
+ *
+ *        INPP
+ *        DSVS Lp           <- pula o codigo das rotinas
+ *        (rotinas)            gerado dentro de declaracoes()
+ *    Lp: NADA
+ *        AMEM n            <- n contado durante as declaracoes
+ *        (comandos)
+ *        PARA
+ *
+ * O AMEM fica depois de declaracoes() porque so ali todas as secoes
+ * var ja foram lidas (elas podem aparecer depois de uma rotina). O
+ * DSVS e emitido mesmo sem rotinas, para manter o codigo uniforme.
  */
 void programa(void)
 {
@@ -1558,6 +1875,10 @@ void secao_var(void)
  * decl_var -> lista_ids ":" tipo
  * ------------------------------------------------------------
  * Uma linha de declaracao, como "nome, sobrenome: caractere".
+ *
+ * Como a lista de nomes vem antes do tipo, lista_ids devolve quantos
+ * nomes leu e tipo devolve quantas posicoes cada um ocupa; o produto
+ * soma no totalPosicoes, que vira o operando do AMEM.
  */
 void decl_var(void)
 {
@@ -1572,6 +1893,9 @@ void decl_var(void)
  * lista_ids -> ID { "," ID }
  * ------------------------------------------------------------
  * Um ou mais identificadores separados por virgula.
+ *
+ * Retorno: quantidade de identificadores. Comeca em 1 porque a gramatica
+ *          garante o primeiro ID antes do laco.
  */
 int lista_ids(void)
 {
@@ -1593,6 +1917,13 @@ int lista_ids(void)
  * Se comecar com VETOR, consome a faixa e o DE; nos dois casos o tipo
  * termina num tipo basico, entao a chamada final e comum as duas
  * producoes.
+ *
+ * Os limites do vetor sao lidos do atributo do token ANTES de cada
+ * consumir, porque depois o lookahead ja e o ".." ou o "]".
+ *
+ * Retorno: posicoes de memoria ocupadas por variavel deste tipo: 1 para
+ *          tipo basico e fim - inicio + 1 para vetor (o +1 conta as
+ *          duas pontas: [1..4] tem 4 posicoes).
  */
 int tipo(void)
 {
@@ -1618,6 +1949,13 @@ int tipo(void)
  * tipo_basico -> INTEIRO | REAL | CARACTERE | LOGICO
  * ------------------------------------------------------------
  * Os quatro tipos primitivos do MiniVisualg.
+ *
+ * O tipo e guardado no inicio e devolvido num unico return no fim:
+ * como o compilador nao sabe que erroSintatico nunca retorna, um return
+ * so dentro dos cases geraria o warning de funcao sem retorno.
+ *
+ * Retorno: o tipo lido (TOKEN_INTEIRO, TOKEN_REAL, TOKEN_CARACTERE ou
+ *          TOKEN_LOGICO), usado nos parametros e no retorno de funcoes.
  */
 TokenNome tipo_basico(void)
 {
@@ -1693,7 +2031,16 @@ void comando(void)
  * ------------------------------------------------------------
  * Os dois comandos tem a mesma sintaxe e so diferem na quebra de
  * linha, que e questao de execucao e nao de analise. Por isso a
- * mesma funcao atende aos dois.
+ * mesma funcao atende aos dois, e o codigo gerado e o mesmo (a MEPA
+ * nao tem instrucao de quebra de linha).
+ *
+ * Codigo gerado: para cada argumento, <expr> IMPR.
+ *
+ * O laco e proprio, em vez de argumentos(), por dois motivos: o IMPR
+ * vai depois de cada argumento, e argumentos() tambem serve as chamadas
+ * de rotina, onde nao pode haver IMPR. Um texto entre aspas nao empilha
+ * nada (ver fator), entao o argumento que comeca com STRING nao recebe
+ * IMPR. Limitacao: concatenacao como "a" + x geraria codigo errado.
  */
 void cmd_escreva(void)
 {
@@ -1721,10 +2068,20 @@ void cmd_escreva(void)
  * ------------------------------------------------------------
  * Um comando que comeca com identificador pode ser uma atribuicao,
  * uma atribuicao a elemento de vetor ou a chamada de um procedimento.
- * So da para decidir depois de consumir o ID e olhar o proximo token.
+ * So da para decidir depois de consumir o ID e olhar o proximo token,
+ * por isso o indice e a linha do ID sao guardados antes.
  *
  * O caso vazio cobre a chamada de procedimento sem parametros, que no
  * Visualg e escrita sem parenteses (linha_decorativa).
+ *
+ * Codigo gerado:
+ *    x <- expr .......... <expr> ARMZ x
+ *    p(args) / p ........ <args> ARMZ params CHPR Lp
+ *    v[i] <- expr ....... nao suportado (vetores)
+ *
+ * Verificacoes semanticas: regra 8 (funcao nao pode ser usada como
+ * procedimento) e identificador que nao e procedimento usado como
+ * comando.
  */
 void cmd_id(void)
 {
@@ -1739,6 +2096,7 @@ void cmd_id(void)
       }
       else if (lookahead.type == TOKEN_ABRE_COL)
       {
+            naoSuportado(linha, "vetores");
             consumir(TOKEN_ABRE_COL);
             expr();
             consumir(TOKEN_FECHA_COL);
@@ -1776,6 +2134,8 @@ void cmd_id(void)
  * O argumento do leia tem de ser uma variavel (ou posicao de vetor),
  * nao uma expressao qualquer: ler para dentro de "a + b" nao faz
  * sentido. Por isso chama variavel() e nao expr().
+ *
+ * Codigo gerado: LEIT, ARMZ variavel.
  */
 void cmd_leia(void)
 {
@@ -1790,14 +2150,20 @@ void cmd_leia(void)
 /*
  * variavel -> ID [ "[" expr "]" ]
  * ------------------------------------------------------------
- * Variavel simples ou elemento de vetor, como notas[i].
+ * Variavel simples ou elemento de vetor, como notas[i]. Nao gera codigo:
+ * so reconhece a variavel e devolve o nome para quem chamou decidir o
+ * que emitir. O elemento de vetor nao e suportado na geracao.
+ *
+ * Retorno: indice do nome da variavel na tabelaSimbolos.
  */
 int variavel(void)
 {
       int idx = lookahead.attribute.table_index;
+      int linha = lookahead.line;
       consumir(TOKEN_ID);
       if (lookahead.type == TOKEN_ABRE_COL)
       {
+            naoSuportado(linha, "vetores");
             consumir(TOKEN_ABRE_COL);
             expr();
             consumir(TOKEN_FECHA_COL);
@@ -1811,6 +2177,20 @@ int variavel(void)
  * O FIMSE obrigatorio elimina a ambiguidade do "senao pendurado": em
  * um se dentro de outro, cada senao pertence ao se que ainda nao foi
  * fechado.
+ *
+ * Codigo gerado (com senao):         (sem senao):
+ *
+ *        <expr>                            <expr>
+ *        DSVF Ls                           DSVF Ls
+ *        <entao>                           <entao>
+ *        DSVS Lf                       Ls: NADA
+ *    Ls: NADA
+ *        <senao>
+ *    Lf: NADA
+ *
+ * Os dois rotulos sao pedidos no inicio e ficam em variaveis locais
+ * (ver proximo_rotulo). Sem senao o segundo nao e usado e a numeracao
+ * fica com uma lacuna, o que nao afeta a execucao.
  */
 void cmd_se(void)
 {
@@ -1831,7 +2211,10 @@ void cmd_se(void)
             emitirRotulo(rotuloFim);
       }
       else
+      {
+            /* sem senao, o rotulo do senao e o proprio fim do se */
             emitirRotulo(rotuloSenao);
+      }
 
       consumir(TOKEN_FIMSE);
 }
@@ -1841,8 +2224,35 @@ void cmd_se(void)
  *             comandos FIMPARA
  * ------------------------------------------------------------
  * O PASSO e opcional; quando aparece, o valor pode ser negativo, como
- * em "para i de 10 ate 0 passo -2 faca" (o menos unario e tratado em
- * fator).
+ * em "para i de 10 ate 0 passo -2 faca" (o lexico entrega "-2" como
+ * SUB seguido de NUM_INT).
+ *
+ * Codigo gerado:
+ *
+ *        <inicio>
+ *        ARMZ i
+ *    Li: NADA
+ *        CRVL i
+ *        <limite>
+ *        CMEG | CMAG       <- CMEG se o passo e positivo, CMAG se negativo
+ *        DSVF Lf
+ *        <corpo>
+ *        CRVL i
+ *        CRCT passo
+ *        SOMA
+ *        ARMZ i            <- incremento gerado pelo compilador
+ *        DSVS Li
+ *    Lf: NADA
+ *
+ * No fonte o passo aparece ANTES do corpo, mas o incremento precisa
+ * sair DEPOIS dele. Como o codigo e gerado durante a leitura, o passo e
+ * restrito a uma constante inteira, lida direto do token e guardada
+ * numa variavel local (sem gerar codigo na hora). Pelo mesmo motivo a
+ * comparacao so e emitida depois de ler o passo: e o sinal dele que
+ * decide entre CMEG e CMAG.
+ *
+ * Verificacoes semanticas: passo nao constante e passo zero (que faria
+ * o laco nunca terminar).
  */
 void cmd_para(void)
 {
@@ -1912,6 +2322,15 @@ void cmd_para(void)
  * cmd_enquanto -> ENQUANTO expr FACA comandos FIMENQUANTO
  * ------------------------------------------------------------
  * Laco condicional.
+ *
+ * Codigo gerado:
+ *
+ *    Li: NADA              <- antes da condicao: ela e recalculada a
+ *        <expr>               cada volta
+ *        DSVF Lf
+ *        <corpo>
+ *        DSVS Li
+ *    Lf: NADA
  */
 void cmd_enquanto(void)
 {
@@ -1932,8 +2351,16 @@ void cmd_enquanto(void)
 /*
  * cmd_retorne -> RETORNE expr
  * ------------------------------------------------------------
- * Retorno de funcao. A gramatica nao exige que esteja dentro de uma
- * funcao: isso e verificacao semantica, fora do escopo da Fase 1.
+ * Retorno de funcao. O valor calculado e guardado na posicao de memoria
+ * com o nome da funcao (quem chamou le dali com CRVL depois do CHPR),
+ * e o RTPR sai da funcao na hora, mesmo que o retorne esteja no meio do
+ * corpo (dentro de um se, por exemplo).
+ *
+ * Codigo gerado: <expr> ARMZ nome_da_funcao RTPR 1,0
+ *
+ * So faz sentido dentro de uma funcao: no programa principal ou num
+ * procedimento nao existe onde guardar o valor, entao e erro semantico.
+ * A conferencia do tipo do valor (regra 9) usa rotinaAtual->tipoRetorno.
  */
 void cmd_retorne(void)
 {
@@ -1954,6 +2381,21 @@ void cmd_retorne(void)
  * ------------------------------------------------------------
  * A lista de parametros e opcional: o anexo diz que procedimentos sem
  * parametros nao levam parenteses nem na declaracao nem na chamada.
+ *
+ * Codigo gerado (entre o DSVS e o AMEM do programa principal):
+ *
+ *    Lp: NADA              <- rotulo guardado na tabela, usado pelo CHPR
+ *        ENPR 1
+ *        <corpo>
+ *        RTPR 1,0
+ *
+ * ENPR e RTPR sao as instrucoes de entrada e saida de rotina da MEPA do
+ * livro de Kowaltowski (nao aparecem nos slides; ver README). O nivel
+ * lexico e sempre 1 e o RTPR descarta 0 posicoes, porque os parametros
+ * ficam em posicoes de memoria com nome, e nao na pilha.
+ *
+ * A rotina e registrada antes do corpo, para que o nome ja seja
+ * conhecido, e rotinaAtual marca que o corpo esta dentro dela.
  */
 void procedimento(void)
 {
@@ -1989,6 +2431,10 @@ void procedimento(void)
  * ------------------------------------------------------------
  * Diferente do procedimento, a funcao sempre declara parenteses e o
  * tipo de retorno depois dos dois pontos.
+ *
+ * Gera o mesmo codigo do procedimento. A diferenca e que a funcao
+ * reserva uma posicao de memoria a mais, com o proprio nome, onde o
+ * retorne guarda o valor de retorno.
  */
 void funcao(void)
 {
@@ -2024,6 +2470,9 @@ void funcao(void)
  * parametros -> parametro { "," parametro }
  * ------------------------------------------------------------
  * Lista de parametros formais separados por virgula.
+ *
+ * Parametro: r - rotina que esta sendo declarada, repassada a cada
+ *                parametro()
  */
 void parametros(Rotina *r)
 {
@@ -2034,10 +2483,15 @@ void parametros(Rotina *r)
             parametro(r);
       }
 }
+
 /*
  * parametro -> ID ":" tipo_basico
  * ------------------------------------------------------------
- * Um parametro formal, como "a: inteiro".
+ * Um parametro formal, como "a: inteiro". Registra o nome e o tipo na
+ * rotina (na ordem da declaracao) e reserva uma posicao de memoria para
+ * ele no AMEM: o parametro e uma posicao com nome, como uma variavel.
+ *
+ * Parametro: r - rotina a que o parametro pertence
  */
 void parametro(Rotina *r)
 {
@@ -2050,23 +2504,24 @@ void parametro(Rotina *r)
 }
 
 /* ============================================================
- *  7. MAIN
+ *  8. MAIN
  * ============================================================ */
 
 /*
  * main
  * ------------------------------------------------------------
  * Recebe o nome do fonte por linha de comando, carrega o arquivo,
- * abre a saida e dispara a analise.
+ * abre as duas saidas e dispara a compilacao.
  *
  * O primeiro nextToken() carrega o lookahead inicial (o parser sempre
  * precisa de um token na mao antes de comecar). Depois de programa(),
  * o teste de TOKEN_EOF garante que nao sobrou nada depois do
  * fimalgoritmo.
  *
- * Retorno: 0 se a analise terminou sem erros, 1 em caso de erro de
- *          uso ou de arquivo. Os erros lexicos e sintaticos encerram
- *          o programa antes, dentro das proprias funcoes de erro.
+ * Retorno: 0 se a compilacao terminou sem erros, 1 em caso de erro de
+ *          uso ou de arquivo. Os erros lexicos, sintaticos, semanticos
+ *          e de recurso nao suportado encerram o programa antes, dentro
+ *          das proprias funcoes de erro.
  */
 int main(int argc, char *argv[])
 {
@@ -2093,13 +2548,15 @@ int main(int argc, char *argv[])
       arquivoMepa = fopen(ARQUIVO_MEPA, "w");
       if (arquivoMepa == NULL)
       {
-            printf("Erro ao criar %s \n", ARQUIVO_MEPA);
+            printf("Erro ao criar %s\n", ARQUIVO_MEPA);
+            fclose(arquivoSaida);
             free(buffer);
             return 1;
       }
 
-      /* Etapas 2 e 3 juntas: o parser pede os tokens ao lexico, que
-       * imprime cada um deles enquanto a analise acontece. */
+      /* Todas as etapas numa unica passagem: o parser pede os tokens ao
+       * lexico, que imprime cada um deles, e emite o codigo MEPA
+       * enquanto a analise acontece. */
       nextToken();
       programa();
 
