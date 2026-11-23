@@ -15,4 +15,5 @@ r1 <- a / b
 r2 <- 1.5 * 2
 l1 <- (a > b) e (b > 5)
 l2 <- (a > b) ou (b > 5)
+escreval(x1, x2, x3, x4, x5, r1, r2, l1, l2)
 fimalgoritmo
