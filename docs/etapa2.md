@@ -50,9 +50,9 @@ A geração de código é **dirigida pela sintaxe**: o próprio parser descenden
 
 ### 2.1 Infraestrutura
 
-- Funções de emissão por formato de operando: `emitir`, `emitirNome`, `emitirInteiro`, `emitirReal`, `emitirDoisInteiros`, `emitirDesvio` e `emitirRotulo`.
+- Funções de emissão por formato de operando: `imprimir`, `imprimirNome`, `imprimirInteiro`, `imprimirReal`, `imprimirDoisInteiros`, `imprimirDesvio` e `imprimirRotulo`.
 - `proximo_rotulo()`, como sugerido no enunciado: devolve 1, 2, 3… a partir de um contador `static`.
-- `encerrarComErro()`: centraliza o fechamento dos arquivos e a remoção do MEPA incompleto em todos os erros.
+- `sairComErro()`: centraliza o fechamento dos arquivos e a remoção do MEPA incompleto em todos os erros.
 
 ### 2.2 Tradução de cada construção
 
@@ -187,7 +187,7 @@ O enunciado pede que o arquivo TXT gerado "seja executado na máquina virtual ME
 
 ### 7.2 A VM encontrada: `maquina-virtual-mepa`, de HugoJF
 
-Procurando no GitHub por uma implementação pública da MEPA, encontramos o repositório **`HugoJF/maquina-virtual-mepa`** (https://github.com/HugoJF/maquina-virtual-mepa), com uma versão executável no navegador em https://hugojf.github.io/maquina-virtual-mepa/mepa.html. É um projeto independente, de terceiros, feito em JavaScript. Segundo o próprio README do projeto, a implementação foi feita a partir de trechos de um livro, sem identificar a obra. Pelo conjunto e pelo formato das instruções (por exemplo, `CRVL k,n` com nível léxico e deslocamento), trata-se da MEPA do livro de Tomasz Kowaltowski (ver seção 8.3).
+Procurando no GitHub por uma implementação pública da MEPA, encontramos o repositório **`HugoJF/maquina-virtual-mepa`** (https://github.com/HugoJF/maquina-virtual-mepa), com uma versão executável no navegador em https://hugojf.github.io/maquina-virtual-mepa/mepa.html. É um projeto independente, de terceiros, feito em JavaScript. Segundo o próprio README do projeto, a implementação foi feita a partir de trechos de um livro, sem identificar a obra. Pelo conjunto e pelo formato das instruções (por exemplo, `CRVL k,n` com nível léxico e deslocamento), trata-se da MEPA do livro de Tomasz Kowaltowski (ver seção 8.4).
 
 Testamos essa VM com programas escritos à mão e encontramos estas limitações:
 
@@ -228,11 +228,21 @@ Conforme exigido pelo enunciado, informamos que a ferramenta **Claude (Anthropic
 - **Ordem de emissão nas expressões:** a necessidade de guardar o operador, o `op_code`, o valor numérico e o índice do identificador **antes** de consumir o token foi apontada pela IA; o código foi escrito pelo integrante e revisado.
 - **`cmd_para`:** a decisão de ler o passo direto do token (o passo aparece antes do corpo no fonte, mas o incremento precisa vir depois) e a escolha entre `CMEG` e `CMAG` pelo sinal foram propostas pela IA.
 - **Rotinas:** a estratégia de parâmetros como posições de memória com nome, o retorno guardado no nome da função, a ordem reversa dos `ARMZ` na chamada e a estrutura `Rotina` foram propostos pela IA.
-- **Correções apontadas pela IA:** contagem de identificadores em `lista_ids` (contava um a menos), declaração logo após um `case` (não compila em gcc anterior à versão 11), ausência de `default` em `switch` sobre enum (gera warning com `-Wall`), retorno do `fread` ignorado (warning com o comando do enunciado), formato do `emitirDoisInteiros` e posição da leitura do tipo de retorno na `funcao`.
+- **Correções apontadas pela IA:** contagem de identificadores em `lista_ids` (contava um a menos), declaração logo após um `case` (não compila em gcc anterior à versão 11), ausência de `default` em `switch` sobre enum (gera warning com `-Wall`), retorno do `fread` ignorado (warning com o comando do enunciado), formato do `imprimirDoisInteiros` e posição da leitura do tipo de retorno na `funcao`.
 - **`naoSuportado` e os pontos de verificação de vetores e `mod`:** fornecidos pela IA.
 - **`ferramentas/mepa.py`:** escrito integralmente pela IA, como ferramenta de teste.
 
-### 8.3 Instruções de rotina (`CHPR`, `ENPR`, `RTPR`)
+### 8.3 Análise semântica (minitabela de símbolos)
+
+Na parte de análise semântica, a IA foi usada para:
+
+- ajudar a entender o código escrito pelos colegas;
+- navegar entre as seções do `compilador.c`;
+- escrever a documentação;
+- verificar se a implementação corresponde ao que o enunciado pede;
+- depurar erros.
+
+### 8.4 Instruções de rotina (`CHPR`, `ENPR`, `RTPR`)
 
 **O problema.** O enunciado pede a geração de código para "todos os comandos e rotinas da linguagem", mas os slides da disciplina sobre a MEPA cobrem apenas expressões, atribuição, desvios, leitura e escrita: não há nenhuma instrução para chamar um procedimento ou uma função, nem para voltar dela.
 

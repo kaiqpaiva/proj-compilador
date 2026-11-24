@@ -27,14 +27,17 @@
  *  ORGANIZACAO DO ARQUIVO
  *
  *    1. Definicao dos tokens .... enum TokenNome, OpRelType,
- *                                 struct Token, struct Rotina e
+ *                                 struct Token, struct Rotina,
  *                                 tabelas de nomes e de instrucoes
+ *                                 e struct TNo (minitabela)
  *    2. Estado global ........... buffer do fonte, posicao, linha,
  *                                 lookahead, tabela de simbolos,
- *                                 tabela de rotinas e arquivos
+ *                                 tabela de rotinas, arquivos e
+ *                                 inicio da minitabela
  *    3. Funcoes auxiliares ...... leitura do arquivo, tabela de
- *                                 simbolos, tabela de rotinas e
- *                                 formatacao da saida
+ *                                 simbolos, tabela de rotinas,
+ *                                 formatacao da saida e operacoes
+ *                                 da minitabela de simbolos (TNo)
  *    4. Tratamento de erros ..... erros lexico, sintatico e semantico
  *                                 e recursos nao suportados
  *    5. Analisador lexico ....... Etapa 2 (obterToken)
@@ -61,8 +64,8 @@
  *    correspondentes no saida_mepa.txt. Nao ha arvore intermediaria nem
  *    segunda passada sobre o fonte.
  *
- *      cmd_se -> expr -> ... -> fator -> emitir("CRVL", ...)
- *             -> emitirDesvio("DSVF", ...) -> comandos -> ...
+ *      cmd_se -> expr -> ... -> fator -> imprimir("CRVL", ...)
+ *             -> imprimirDesvio("DSVF", ...) -> comandos -> ...
  *
  *  O programa termina com codigo 0 quando a compilacao vai ate o fim
  *  sem erros, e com codigo 1 em qualquer erro (de abertura de arquivo,
@@ -355,6 +358,39 @@ const PalavraReservada palavrasReservadas[] = {
       {"e", TOKEN_E}, {"ou", TOKEN_OU}, {"mod", TOKEN_MOD}
 };
 
+/* ------------------------------------------------------------
+ *  Fase 2 - minitabela de simbolos (TNo)
+ * ------------------------------------------------------------ */
+
+/*
+ * No da minitabela de simbolos, exatamente como pede o enunciado.
+ *
+ * A minitabela guarda so as VARIAVEIS declaradas (as rotinas ficam na
+ * tabelaRotinas) e e a base da analise semantica: diz se um nome foi
+ * declarado, qual o seu endereco e qual o seu tipo. Ela nao substitui a
+ * tabelaSimbolos do lexico, que guarda o lexema de todo identificador
+ * que aparece no fonte, declarado ou nao.
+ *
+ * A estrutura e uma lista encadeada. Os nos sao inseridos
+ * sempre no FIM e nunca removidos, entao a posicao do no na
+ * lista e igual ao seu endereco (ver acessaVarNaTabelaSimbolos).
+ *
+ * Campos:
+ *   ID       - nome da variavel (no maximo 15 caracteres + '\0')
+ *   endereco - ordem de declaracao: a primeira variavel e 0, a segunda 1...
+ *   tipo     - nome curto do tipo: "int", "real", "char" ou "logico".
+ *              O vetor tem 7 posicoes, entao "inteiro" (7 letras + '\0')
+ *              e "caractere" nao cabem; por isso os nomes curtos (ver
+ *              nomeCurtoDoTipo)
+ *   prox     - proximo no, ou NULL no ultimo
+ */
+typedef struct _TNo {
+      char ID [16];
+      int endereco;
+      char tipo [7];
+      struct _TNo *prox;
+} TNo;
+
 /* ============================================================
  *  2. ESTADO GLOBAL
  * ============================================================
@@ -390,9 +426,22 @@ static int totalRotinas = 0;
  * Usada por cmd_retorne para saber em qual funcao guardar o valor. */
 static Rotina *rotinaAtual = NULL;
 
-/* Prototipo: encerrarComErro e definida na secao 4, mas e usada antes
- * dela pelas funcoes de tabela da secao 3. */
-void encerrarComErro(void);
+/* ------------------------------------------------------------
+ *  Fase 2 - minitabela de simbolos (TNo)
+ * ------------------------------------------------------------ */
+
+/* Primeiro no da minitabela (NULL enquanto nenhuma variavel foi
+ * declarada) e endereco que a proxima variavel declarada vai receber.
+ * O endereco e um contador proprio, e nao o totalPosicoes: este soma o
+ * tamanho dos vetores e as posicoes extras das funcoes, e serve so para
+ * o AMEM. */
+static TNo *minitabela = NULL;
+static int proxEndereco = 0;
+
+/* Prototipos: sairComErro e erroSemantico sao definidas na secao 4, mas
+ * sao usadas antes dela pelas funcoes de tabela da secao 3. */
+void sairComErro(void);
+void erroSemantico(int linha, const char *mensagem);
 
 /* ============================================================
  *  3. FUNCOES AUXILIARES
@@ -480,7 +529,7 @@ int inserirSimbolo(const char *lexema)
                           "ERRO: tabela de simbolos cheia (limite de %d entradas)\n",
                           MAX_SIMBOLOS);
             }
-            encerrarComErro();
+            sairComErro();
       }
 
       strncpy(tabelaSimbolos[totalSimbolos], lexema, MAX_LEXEMA - 1);
@@ -510,7 +559,7 @@ Rotina *inserirRotina(int nome, int ehFuncao)
             fprintf(arquivoSaida,
                     "ERRO: tabela de rotinas cheia (limite de %d rotinas)\n",
                     MAX_ROTINAS);
-            encerrarComErro();
+            sairComErro();
       }
 
       Rotina *r = &tabelaRotinas[totalRotinas];
@@ -543,7 +592,7 @@ void adicionarParametro(Rotina *r, int nome, TokenNome tipo)
             fprintf(arquivoSaida,
                     "ERRO: rotina com parametros demais (limite de %d)\n",
                     MAX_PARAMS);
-            encerrarComErro();
+            sairComErro();
       }
 
       r->params[r->numParams] = nome;
@@ -720,28 +769,204 @@ int igualSemCaixa(const char *a, const char *b)
       return *a == *b;
 }
 
+/* ------------------------------------------------------------
+ *  Fase 2 - minitabela de simbolos (TNo)
+ * ------------------------------------------------------------
+ *  O acesso a uma variavel e feito em dois passos, simulando o comportamento
+ *   de um compilador real: primeiro o NOME e resolvido para um ENDERECO
+ *  (busca_tabela_simbolos, que tambem confere se foi declarada) e, dali
+ *  em diante, so o endereco circula (acessaVarNaTabelaSimbolos).
+ *  (Também fizemos assim para respeitar o enunciado do proj 2.
+ *  busca_tabela_simbolos deve retornar Int)
+ *
+ *    inserirVarSemant ............ declaracao: cria o no no fim da lista
+ *    busca_tabela_simbolos ....... uso: nome -> endereco (ou erro)
+ *    acessaVarNaTabelaSimbolos ... endereco -> no (tipo, nome...)
+ *    liberarTabelaSimbolos ....... libera os nos no fim da execucao
+ * ------------------------------------------------------------ */
+
+/*
+ * nomeCurtoDoTipo
+ * ------------------------------------------------------------
+ * Traduz o tipo basico lido pelo parser para o nome guardado no campo
+ * tipo do TNo. Os nomes sao curtos porque o campo tem so 7 posicoes
+ * (ver comentario da struct TNo).
+ *
+ * Parametro: tipo - TOKEN_INTEIRO, TOKEN_REAL, TOKEN_CARACTERE ou
+ *                   TOKEN_LOGICO
+ * Retorno:   "int", "real", "char" ou "logico" ("?" se o valor nao for
+ *            um tipo basico; nao deve acontecer, e so uma protecao).
+ */
+const char *nomeCurtoDoTipo(TokenNome tipo)
+{
+      switch (tipo)
+      {
+            case TOKEN_INTEIRO:   return "int";
+            case TOKEN_REAL:      return "real";
+            case TOKEN_CARACTERE: return "char";
+            case TOKEN_LOGICO:    return "logico";
+            default:              return "?";
+      }
+}
+
+/*
+ * inserirVarSemant
+ * ------------------------------------------------------------
+ * Registra uma variavel declarada no FIM da minitabela, com o proximo
+ * endereco livre.
+ *
+ * Como inserir no fim ja exige percorrer a lista inteira, o mesmo laco
+ * confere se o nome ja foi declarado (regra 3 do enunciado:
+ * identificador unico). Assim a insercao nao precisa de uma funcao de
+ * busca separada.
+ *
+ * A comparacao usa strcmp (diferencia maiusculas e minusculas), o mesmo
+ * criterio do inserirSimbolo do lexico: para o compilador, "Idade" e
+ * "idade" sao nomes diferentes desde a analise lexica.
+ *
+ * Parametros: nome  - nome da variavel
+ *             tipo  - tipo basico declarado (TOKEN_INTEIRO, ...)
+ *             linha - linha da declaracao, para as mensagens de erro
+ */
+void inserirVarSemant(const char *nome, TokenNome tipo, int linha)
+{
+      /* o campo ID tem 16 posicoes: truncar o nome poderia fazer dois
+       * nomes diferentes virarem iguais, entao e melhor recusar */
+      if (strlen(nome) > 15)
+            erroSemantico(linha, "nome de variavel com mais de 15 caracteres");
+
+      TNo *ultimo = NULL;
+      for (TNo *atual = minitabela; atual != NULL; atual = atual->prox)
+      {
+            if (strcmp(atual->ID, nome) == 0)
+                  erroSemantico(linha, "variavel declarada mais de uma vez");
+            ultimo = atual;
+      }
+
+      TNo *novo = malloc(sizeof(TNo));
+      if (novo == NULL)
+      {
+            printf("ERRO: memoria insuficiente para a tabela de simbolos\n");
+            fprintf(arquivoSaida,
+                    "ERRO: memoria insuficiente para a tabela de simbolos\n");
+            sairComErro();
+      }
+
+      /* os tamanhos ja foram garantidos acima e em nomeCurtoDoTipo, entao
+       * strcpy nao passa do fim dos vetores */
+      strcpy(novo->ID, nome);
+      strcpy(novo->tipo, nomeCurtoDoTipo(tipo));
+      novo->endereco = proxEndereco++;
+      novo->prox = NULL;
+
+      /* lista vazia: o novo no vira o primeiro */
+      if (ultimo == NULL)
+            minitabela = novo;
+      else
+            ultimo->prox = novo;
+}
+
+/*
+ * busca_tabela_simbolos
+ * ------------------------------------------------------------
+ * Funcao pedida pelo enunciado: recebe o nome do identificador (o
+ * atributo do token corrente) e devolve o endereco da variavel na
+ * minitabela. Se o nome nao foi declarado, e erro semantico e a
+ * compilacao termina (regra 1: variavel declarada antes do uso).
+ *
+ * Por isso quem chama nunca precisa testar o retorno: se a funcao
+ * voltou, a variavel existe.
+ *
+ * Nome, parametro atributo_ID e retorno seguem o enunciado. O parametro
+ * linha foi acrescentado para que a mensagem de erro informe a linha do
+ * fonte, como todas as outras mensagens de erro do compilador.
+ *
+ * Parametros: atributo_ID - nome da variavel (ver nomeDoSimbolo)
+ *             linha       - linha do uso, para a mensagem de erro
+ * Retorno:    endereco da variavel.
+ */
+int busca_tabela_simbolos(const char *atributo_ID, int linha)
+{
+      for (TNo *atual = minitabela; atual != NULL; atual = atual->prox)
+      {
+            if (strcmp(atual->ID, atributo_ID) == 0)
+                  return atual->endereco;
+      }
+
+      erroSemantico(linha, "variavel nao declarada");
+      return -1;  /* nunca chega aqui: erroSemantico encerra o programa */
+}
+
+/*
+ * acessaVarNaTabelaSimbolos
+ * ------------------------------------------------------------
+ * Devolve o no da variavel a partir do endereco obtido em
+ * busca_tabela_simbolos, para consultar o tipo (e os demais campos).
+ *
+ * Nao compara nomes: como os nos sao inseridos sempre no fim e nunca
+ * removidos, o no de endereco k e o k-esimo da lista, entao basta
+ * andar k passos. Se a insercao mudar (no inicio, por exemplo), esta
+ * funcao deixa de valer.
+ *
+ * O acesso por endereco e "simulado": numa lista encadeada ele continua
+ * percorrendo os nos. Num compilador maior, a tabela seria um vetor e o
+ * endereco seria o indice direto. Ou seria um hashmap, também com acesso direto.
+ *
+ * Parametro: endereco - endereco devolvido por busca_tabela_simbolos
+ * Retorno:   o no, ou NULL se o endereco nao existir (nao deve acontecer
+ *            com um endereco vindo de busca_tabela_simbolos).
+ */
+TNo *acessaVarNaTabelaSimbolos(int endereco)
+{
+      TNo *atual = minitabela;
+      for (int i = 0; i < endereco && atual != NULL; i++)
+            atual = atual->prox;
+      return atual;
+}
+
+/*
+ * liberarTabelaSimbolos
+ * ------------------------------------------------------------
+ * Libera todos os nos da minitabela. E chamada nas duas saidas do
+ * programa: no fim do main e em sairComErro.
+ */
+void liberarTabelaSimbolos(void)
+{
+      TNo *atual = minitabela;
+      while (atual != NULL)
+      {
+            /* guarda o proximo antes do free: depois dele o no nao pode
+             * mais ser lido */
+            TNo *proximo = atual->prox;
+            free(atual);
+            atual = proximo;
+      }
+      minitabela = NULL;
+}
+
 /* ============================================================
  *  4. TRATAMENTO DE ERROS
  * ============================================================
  *  Todas as funcoes de erro seguem o que o enunciado pede: mostram a
  *  mensagem com a linha do fonte e encerram todo o processo. O
- *  encerramento passa sempre por encerrarComErro, que fecha os arquivos
+ *  encerramento passa sempre por sairComErro, que fecha os arquivos
  *  (senao os tokens ja escritos ficariam presos no buffer do stdio e o
  *  arquivo sairia vazio justamente nos testes de erro) e apaga o
  *  saida_mepa.txt incompleto.
  * ============================================================ */
 
 /*
- * encerrarComErro
+ * sairComErro
  * ------------------------------------------------------------
  * Ponto unico de saida em caso de erro: fecha o saida_tokens.txt,
  * fecha e apaga o saida_mepa.txt (um codigo MEPA pela metade pareceria
- * valido), libera o buffer do fonte e termina com codigo 1.
+ * valido), libera o buffer do fonte e a minitabela de simbolos e
+ * termina com codigo 1.
  *
  * Os testes de NULL cobrem erros que acontecem antes de os dois
  * arquivos estarem abertos.
  */
-void encerrarComErro(void)
+void sairComErro(void)
 {
       if (arquivoSaida != NULL)
             fclose(arquivoSaida);
@@ -753,6 +978,7 @@ void encerrarComErro(void)
       }
 
       free(buffer);
+      liberarTabelaSimbolos();
       exit(1);
 }
 
@@ -771,7 +997,7 @@ void erroSintatico(Token token, const char *esperado)
              token.line, esperado, nomeDoToken(token.type));
       fprintf(arquivoSaida, "%d# ERRO SINTATICO: esperado %s, encontrado %s\n",
               token.line, esperado, nomeDoToken(token.type));
-      encerrarComErro();
+      sairComErro();
 }
 
 /*
@@ -787,7 +1013,7 @@ void erroLexico(int linha, const char *sequencia)
 {
       printf("%d# ERRO LEXICO: '%s'\n", linha, sequencia);
       fprintf(arquivoSaida, "%d# ERRO LEXICO: '%s'\n", linha, sequencia);
-      encerrarComErro();
+      sairComErro();
 }
 
 /*
@@ -804,7 +1030,7 @@ void erroSemantico(int linha, const char *mensagem)
 {
       printf("%d# ERRO SEMANTICO: %s\n", linha, mensagem);
       fprintf(arquivoSaida, "%d# ERRO SEMANTICO: %s\n", linha, mensagem);
-      encerrarComErro();
+      sairComErro();
 }
 
 /*
@@ -824,7 +1050,7 @@ void naoSuportado(int linha, const char *recurso)
       printf("%d# NAO SUPORTADO: geracao de codigo para %s\n", linha, recurso);
       fprintf(arquivoSaida, "%d# NAO SUPORTADO: geracao de codigo para %s\n",
               linha, recurso);
-      encerrarComErro();
+      sairComErro();
 }
 
 /* ============================================================
@@ -1229,13 +1455,13 @@ Token obterToken(void)
  *  As funcoes de emissao sabem COMO escrever uma linha; o parser decide
  *  QUANDO e O QUE escrever. Ha uma funcao por formato de operando:
  *
- *    emitir .............. sem operando ......... SOMA, INPP, IMPR
- *    emitirNome .......... nome de variavel ..... CRVL idade
- *    emitirInteiro ....... inteiro .............. CRCT 4, AMEM 3
- *    emitirDoisInteiros .. dois inteiros ........ RTPR 1,0
- *    emitirReal .......... real ................. CRCT 1.6
- *    emitirDesvio ........ rotulo usado ......... DSVF L3, CHPR L2
- *    emitirRotulo ........ rotulo definido ...... L3: NADA
+ *    imprimir .............. sem operando ......... SOMA, INPP, IMPR
+ *    imprimirNome .......... nome de variavel ..... CRVL idade
+ *    imprimirInteiro ....... inteiro .............. CRCT 4, AMEM 3
+ *    imprimirDoisInteiros .. dois inteiros ........ RTPR 1,0
+ *    imprimirReal .......... real ................. CRCT 1.6
+ *    imprimirDesvio ........ rotulo usado ......... DSVF L3, CHPR L2
+ *    imprimirRotulo ........ rotulo definido ...... L3: NADA
  *
  *  As instrucoes ficam recuadas com 4 espacos e os rotulos na coluna 0,
  *  uma instrucao por linha. As variaveis sao referenciadas pelo nome,
@@ -1243,19 +1469,19 @@ Token obterToken(void)
  * ============================================================ */
 
 /*
- * emitir
+ * imprimir
  * ------------------------------------------------------------
  * Escreve uma instrucao sem operando.  Exemplo: "    SOMA"
  *
  * Parametro: instr - mnemonico da instrucao
  */
-void emitir(const char *instr)
+void imprimir(const char *instr)
 {
       fprintf(arquivoMepa, "    %s\n", instr);
 }
 
 /*
- * emitirNome
+ * imprimirNome
  * ------------------------------------------------------------
  * Escreve uma instrucao cujo operando e o nome de uma variavel.
  * Exemplo: "    CRVL idade"
@@ -1263,26 +1489,26 @@ void emitir(const char *instr)
  * Parametros: instr - mnemonico da instrucao
  *             nome  - nome da variavel (ver nomeDoSimbolo)
  */
-void emitirNome(const char *instr, const char *nome)
+void imprimirNome(const char *instr, const char *nome)
 {
       fprintf(arquivoMepa, "    %s %s\n", instr, nome);
 }
 
 /*
- * emitirInteiro
+ * imprimirInteiro
  * ------------------------------------------------------------
  * Escreve uma instrucao com operando inteiro.  Exemplo: "    CRCT 4"
  *
  * Parametros: instr - mnemonico da instrucao
  *             valor - operando
  */
-void emitirInteiro(const char *instr, int valor)
+void imprimirInteiro(const char *instr, int valor)
 {
       fprintf(arquivoMepa, "    %s %d\n", instr, valor);
 }
 
 /*
- * emitirDoisInteiros
+ * imprimirDoisInteiros
  * ------------------------------------------------------------
  * Escreve uma instrucao com dois operandos inteiros separados por
  * virgula, formato do RTPR k,n.  Exemplo: "    RTPR 1,0"
@@ -1291,13 +1517,13 @@ void emitirInteiro(const char *instr, int valor)
  *             valor1 - primeiro operando
  *             valor2 - segundo operando
  */
-void emitirDoisInteiros(const char *instr, int valor1, int valor2)
+void imprimirDoisInteiros(const char *instr, int valor1, int valor2)
 {
       fprintf(arquivoMepa, "    %s %d,%d\n", instr, valor1, valor2);
 }
 
 /*
- * emitirReal
+ * imprimirReal
  * ------------------------------------------------------------
  * Escreve uma instrucao com operando real. O %g evita zeros inuteis
  * (1.6 em vez de 1.600000).  Exemplo: "    CRCT 1.6"
@@ -1305,13 +1531,13 @@ void emitirDoisInteiros(const char *instr, int valor1, int valor2)
  * Parametros: instr - mnemonico da instrucao
  *             valor - operando
  */
-void emitirReal(const char *instr, double valor)
+void imprimirReal(const char *instr, double valor)
 {
       fprintf(arquivoMepa, "    %s %g\n", instr, valor);
 }
 
 /*
- * emitirDesvio
+ * imprimirDesvio
  * ------------------------------------------------------------
  * Escreve uma instrucao que USA um rotulo (desvios e chamada de
  * rotina).  Exemplo: "    DSVF L3"
@@ -1319,13 +1545,13 @@ void emitirReal(const char *instr, double valor)
  * Parametros: instr  - DSVS, DSVF ou CHPR
  *             rotulo - numero do rotulo (o "L" e acrescentado aqui)
  */
-void emitirDesvio(const char *instr, int rotulo)
+void imprimirDesvio(const char *instr, int rotulo)
 {
       fprintf(arquivoMepa, "    %s L%d\n", instr, rotulo);
 }
 
 /*
- * emitirRotulo
+ * imprimirRotulo
  * ------------------------------------------------------------
  * DEFINE um rotulo, marcando a posicao para onde os desvios pulam.
  * O NADA garante que o rotulo sempre tem uma instrucao, mesmo no fim de
@@ -1333,7 +1559,7 @@ void emitirDesvio(const char *instr, int rotulo)
  *
  * Parametro: rotulo - numero do rotulo
  */
-void emitirRotulo(int rotulo)
+void imprimirRotulo(int rotulo)
 {
       fprintf(arquivoMepa, "L%d: NADA\n", rotulo);
 }
@@ -1401,9 +1627,9 @@ void gerarChamada(Rotina *r, int numArgs, int linha)
             erroSemantico(linha, "quantidade de argumentos incompativel com a declaracao da rotina");
 
       for (int i = r->numParams - 1; i >= 0; i--)
-            emitirNome("ARMZ", nomeDoSimbolo(r->params[i]));
+            imprimirNome("ARMZ", nomeDoSimbolo(r->params[i]));
 
-      emitirDesvio("CHPR", r->rotulo);
+      imprimirDesvio("CHPR", r->rotulo);
 }
 
 /* ============================================================
@@ -1565,7 +1791,7 @@ void expr(void)
       {
             consumir(TOKEN_OU);
             expr_e();
-            emitir("DISJ");
+            imprimir("DISJ");
       }
 }
 
@@ -1583,7 +1809,7 @@ void expr_e(void)
       {
             consumir(TOKEN_E);
             expr_rel();
-            emitir("CONJ");
+            imprimir("CONJ");
       }
 }
 
@@ -1608,7 +1834,7 @@ void expr_rel(void)
             OpRelType op = lookahead.attribute.op_code;
             consumir(TOKEN_OP_REL);
             expr_arit();
-            emitir(instrucaoDoOpRel(op));
+            imprimir(instrucaoDoOpRel(op));
       }
 }
 
@@ -1640,10 +1866,10 @@ void expr_arit(void)
             switch (op)
             {
                   case TOKEN_SOMA:
-                        emitir("SOMA");
+                        imprimir("SOMA");
                         break;
                   case TOKEN_SUB:
-                        emitir("SUBT");
+                        imprimir("SUBT");
                         break;
                   default:
                         break;
@@ -1675,13 +1901,13 @@ void termo(void)
             switch (op)
             {
                   case TOKEN_MULT:
-                        emitir("MULT");
+                        imprimir("MULT");
                         break;
                   case TOKEN_DIV:
-                        emitir("DIVF");   /* no Visualg "/" e sempre divisao real */
+                        imprimir("DIVF");   /* no Visualg "/" e sempre divisao real */
                         break;
                   case TOKEN_DIV_INT:
-                        emitir("DIVI");
+                        imprimir("DIVI");
                         break;
                   case TOKEN_MOD:
                         /* a MEPA nao tem instrucao de resto (ver README) */
@@ -1722,11 +1948,11 @@ void fator(void)
       {
             case TOKEN_NUM_INT:
                   /* o valor e lido antes de avancar para o proximo token */
-                  emitirInteiro("CRCT", lookahead.attribute.int_value);
+                  imprimirInteiro("CRCT", lookahead.attribute.int_value);
                   nextToken();
                   break;
             case TOKEN_NUM_FLOAT:
-                  emitirReal("CRCT", lookahead.attribute.float_value);
+                  imprimirReal("CRCT", lookahead.attribute.float_value);
                   nextToken();
                   break;
             case TOKEN_STRING:
@@ -1735,18 +1961,18 @@ void fator(void)
                   nextToken();
                   break;
             case TOKEN_VERDADEIRO:
-                  emitirInteiro("CRCT", 1);
+                  imprimirInteiro("CRCT", 1);
                   nextToken();
                   break;
             case TOKEN_FALSO:
-                  emitirInteiro("CRCT", 0);
+                  imprimirInteiro("CRCT", 0);
                   nextToken();
                   break;
             case TOKEN_SUB:
                   /* menos unario: primeiro o operando, depois o INVR */
                   consumir(TOKEN_SUB);
                   fator();
-                  emitir("INVR");
+                  imprimir("INVR");
                   break;
             case TOKEN_ABRE_PAR:
                   /* os parenteses so mudam a ordem das chamadas: nao geram
@@ -1785,12 +2011,12 @@ void fator(void)
                         gerarChamada(r, numArgs, linha);
 
                         /* o retorno fica na posicao com o nome da funcao */
-                        emitirNome("CRVL", nomeDoSimbolo(r->nome));
+                        imprimirNome("CRVL", nomeDoSimbolo(r->nome));
                   }
                   else
                   {
                         /* variavel simples */
-                        emitirNome("CRVL", nomeDoSimbolo(idx));
+                        imprimirNome("CRVL", nomeDoSimbolo(idx));
                   }
                   break;
             }
@@ -1821,18 +2047,18 @@ void fator(void)
  */
 void programa(void)
 {
-      emitir("INPP");
+      imprimir("INPP");
       int rotuloPrincipal = proximo_rotulo();
-      emitirDesvio("DSVS", rotuloPrincipal);
+      imprimirDesvio("DSVS", rotuloPrincipal);
       consumir(TOKEN_ALGORITMO);
       consumir(TOKEN_STRING);
       declaracoes();
-      emitirRotulo(rotuloPrincipal);
-      emitirInteiro("AMEM", totalPosicoes);
+      imprimirRotulo(rotuloPrincipal);
+      imprimirInteiro("AMEM", totalPosicoes);
       consumir(TOKEN_INICIO);
       comandos();
       consumir(TOKEN_FIMALGORITMO);
-      emitir("PARA");
+      imprimir("PARA");
 }
 
 /*
@@ -2055,7 +2281,7 @@ void cmd_escreva(void)
             int ehTexto = (lookahead.type == TOKEN_STRING);
             expr();
             if (!ehTexto)
-                  emitir("IMPR");
+                  imprimir("IMPR");
       } while (lookahead.type == TOKEN_VIRGULA);
 
       consumir(TOKEN_FECHA_PAR);
@@ -2092,7 +2318,7 @@ void cmd_id(void)
       {
             consumir(TOKEN_ATRIB);
             expr();
-            emitirNome("ARMZ", nomeDoSimbolo(idx));
+            imprimirNome("ARMZ", nomeDoSimbolo(idx));
       }
       else if (lookahead.type == TOKEN_ABRE_COL)
       {
@@ -2142,8 +2368,8 @@ void cmd_leia(void)
       consumir(TOKEN_LEIA);
       consumir(TOKEN_ABRE_PAR);
       int idx = variavel();
-      emitir("LEIT");
-      emitirNome("ARMZ", nomeDoSimbolo(idx));
+      imprimir("LEIT");
+      imprimirNome("ARMZ", nomeDoSimbolo(idx));
       consumir(TOKEN_FECHA_PAR);
 }
 
@@ -2199,21 +2425,21 @@ void cmd_se(void)
 
       consumir(TOKEN_SE);
       expr();
-      emitirDesvio("DSVF", rotuloSenao);
+      imprimirDesvio("DSVF", rotuloSenao);
       consumir(TOKEN_ENTAO);
       comandos();
       if (lookahead.type == TOKEN_SENAO)
       {
-            emitirDesvio("DSVS", rotuloFim);
-            emitirRotulo(rotuloSenao);
+            imprimirDesvio("DSVS", rotuloFim);
+            imprimirRotulo(rotuloSenao);
             consumir(TOKEN_SENAO);
             comandos();
-            emitirRotulo(rotuloFim);
+            imprimirRotulo(rotuloFim);
       }
       else
       {
             /* sem senao, o rotulo do senao e o proprio fim do se */
-            emitirRotulo(rotuloSenao);
+            imprimirRotulo(rotuloSenao);
       }
 
       consumir(TOKEN_FIMSE);
@@ -2265,11 +2491,11 @@ void cmd_para(void)
 
       consumir(TOKEN_DE);
       expr();
-      emitirNome("ARMZ", nomeDoSimbolo(idx));
+      imprimirNome("ARMZ", nomeDoSimbolo(idx));
 
       consumir(TOKEN_ATE);
-      emitirRotulo(rotuloInicio);
-      emitirNome("CRVL", nomeDoSimbolo(idx));
+      imprimirRotulo(rotuloInicio);
+      imprimirNome("CRVL", nomeDoSimbolo(idx));
       expr();
 
       int passo = 1;
@@ -2299,21 +2525,21 @@ void cmd_para(void)
       }
 
       if (passo > 0)
-            emitir("CMEG");
+            imprimir("CMEG");
       else
-            emitir("CMAG");
-      emitirDesvio("DSVF", rotuloFim);
+            imprimir("CMAG");
+      imprimirDesvio("DSVF", rotuloFim);
 
       consumir(TOKEN_FACA);
       comandos();
 
-      emitirNome("CRVL", nomeDoSimbolo(idx));
-      emitirInteiro("CRCT", passo);
-      emitir("SOMA");
-      emitirNome("ARMZ", nomeDoSimbolo(idx));
+      imprimirNome("CRVL", nomeDoSimbolo(idx));
+      imprimirInteiro("CRCT", passo);
+      imprimir("SOMA");
+      imprimirNome("ARMZ", nomeDoSimbolo(idx));
 
-      emitirDesvio("DSVS", rotuloInicio);
-      emitirRotulo(rotuloFim);
+      imprimirDesvio("DSVS", rotuloInicio);
+      imprimirRotulo(rotuloFim);
 
       consumir(TOKEN_FIMPARA);
 }
@@ -2338,13 +2564,13 @@ void cmd_enquanto(void)
       int rotuloFim = proximo_rotulo();
 
       consumir(TOKEN_ENQUANTO);
-      emitirRotulo(rotuloInicio);
+      imprimirRotulo(rotuloInicio);
       expr();
-      emitirDesvio("DSVF", rotuloFim);
+      imprimirDesvio("DSVF", rotuloFim);
       consumir(TOKEN_FACA);
       comandos();
-      emitirDesvio("DSVS", rotuloInicio);
-      emitirRotulo(rotuloFim);
+      imprimirDesvio("DSVS", rotuloInicio);
+      imprimirRotulo(rotuloFim);
       consumir(TOKEN_FIMENQUANTO);
 }
 
@@ -2371,8 +2597,8 @@ void cmd_retorne(void)
             erroSemantico(linha, "retorne so pode ser usado dentro de uma funcao");
 
       expr();
-      emitirNome("ARMZ", nomeDoSimbolo(rotinaAtual->nome));
-      emitirDoisInteiros("RTPR", 1, 0);
+      imprimirNome("ARMZ", nomeDoSimbolo(rotinaAtual->nome));
+      imprimirDoisInteiros("RTPR", 1, 0);
 }
 
 /*
@@ -2407,8 +2633,8 @@ void procedimento(void)
       r->rotulo = proximo_rotulo();
       rotinaAtual = r;
 
-      emitirRotulo(r->rotulo);
-      emitirInteiro("ENPR", 1);
+      imprimirRotulo(r->rotulo);
+      imprimirInteiro("ENPR", 1);
 
       if (lookahead.type == TOKEN_ABRE_PAR)
       {
@@ -2419,7 +2645,7 @@ void procedimento(void)
       consumir(TOKEN_INICIO);
       comandos();
 
-      emitirDoisInteiros("RTPR", 1, 0);
+      imprimirDoisInteiros("RTPR", 1, 0);
       rotinaAtual = NULL;
 
       consumir(TOKEN_FIMPROCEDIMENTO);
@@ -2448,8 +2674,8 @@ void funcao(void)
 
       totalPosicoes++;
 
-      emitirRotulo(r->rotulo);
-      emitirInteiro("ENPR", 1);
+      imprimirRotulo(r->rotulo);
+      imprimirInteiro("ENPR", 1);
 
       consumir(TOKEN_ABRE_PAR);
       parametros(r);
@@ -2460,7 +2686,7 @@ void funcao(void)
       consumir(TOKEN_INICIO);
       comandos();
 
-      emitirDoisInteiros("RTPR", 1, 0);
+      imprimirDoisInteiros("RTPR", 1, 0);
       rotinaAtual = NULL;
 
       consumir(TOKEN_FIMFUNCAO);
@@ -2569,5 +2795,6 @@ int main(int argc, char *argv[])
       fclose(arquivoSaida);
       fclose(arquivoMepa);
       free(buffer);
+      liberarTabelaSimbolos();
       return 0;
 }
