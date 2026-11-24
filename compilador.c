@@ -975,6 +975,97 @@ void liberarTabelaSimbolos(void)
       minitabela = NULL;
 }
 
+/* ------------------------------------------------------------
+ *  Fase 2 - tipos das expressoes (regra 5)
+ * ------------------------------------------------------------
+ *  As expressoes devolvem o tipo como TokenNome (TOKEN_INTEIRO,
+ *  TOKEN_REAL, TOKEN_CARACTERE ou TOKEN_LOGICO), a mesma representacao
+ *  usada nos parametros e no retorno das rotinas. Regra de mistura
+ *  combinada pelo grupo (ver README):
+ *
+ *    + - *  ........ numeros; real se algum lado for real
+ *    /  ............ numeros; sempre real (gera DIVF)
+ *    \  mod ........ so inteiros; resultado inteiro
+ *    < > <= >= ..... numeros (inteiro e real misturam); resultado logico
+ *    =  <> ......... numeros, ou dois valores do mesmo tipo; logico
+ *    e  ou ......... so logicos
+ *    atribuicao .... mesmo tipo, ou inteiro guardado em real
+ * ------------------------------------------------------------ */
+
+/*
+ * tipoDaVariavel
+ * ------------------------------------------------------------
+ * Caminho inverso de nomeCurtoDoTipo: le o tipo guardado na minitabela
+ * ("int", "real"...) e devolve o TokenNome correspondente, para que as
+ * variaveis sejam comparadas com literais, parametros e retornos.
+ *
+ * Parametro: endereco - endereco devolvido por busca_tabela_simbolos
+ * Retorno:   TOKEN_INTEIRO, TOKEN_REAL, TOKEN_CARACTERE ou TOKEN_LOGICO.
+ */
+TokenNome tipoDaVariavel(int endereco)
+{
+      const char *tipo = acessaVarNaTabelaSimbolos(endereco)->tipo;
+
+      if (strcmp(tipo, nomeCurtoDoTipo(TOKEN_INTEIRO)) == 0)
+            return TOKEN_INTEIRO;
+      if (strcmp(tipo, nomeCurtoDoTipo(TOKEN_REAL)) == 0)
+            return TOKEN_REAL;
+      if (strcmp(tipo, nomeCurtoDoTipo(TOKEN_CARACTERE)) == 0)
+            return TOKEN_CARACTERE;
+      return TOKEN_LOGICO;
+}
+
+/*
+ * ehNumerico
+ * ------------------------------------------------------------
+ * Retorno: 1 se o tipo e inteiro ou real, 0 caso contrario.
+ */
+int ehNumerico(TokenNome tipo)
+{
+      return tipo == TOKEN_INTEIRO || tipo == TOKEN_REAL;
+}
+
+/*
+ * tipoAritmetico
+ * ------------------------------------------------------------
+ * Confere os dois lados de "+", "-" ou "*" e calcula o tipo do
+ * resultado: real se algum lado for real, inteiro se os dois forem.
+ *
+ * Parametros: a, b  - tipos dos operandos
+ *             linha - linha do operador, para a mensagem de erro
+ * Retorno:    TOKEN_INTEIRO ou TOKEN_REAL.
+ */
+TokenNome tipoAritmetico(TokenNome a, TokenNome b, int linha)
+{
+      if (!ehNumerico(a) || !ehNumerico(b))
+            erroSemantico(linha, "operador aritmetico exige operandos numericos");
+
+      if (a == TOKEN_REAL || b == TOKEN_REAL)
+            return TOKEN_REAL;
+      return TOKEN_INTEIRO;
+}
+
+/*
+ * tipoAtribuivel
+ * ------------------------------------------------------------
+ * Diz se um valor do tipo origem pode ser guardado numa posicao do tipo
+ * destino: mesmo tipo, ou inteiro guardado em real (nao perde nada).
+ * Real em inteiro nao pode, porque perderia a parte decimal.
+ *
+ * A mesma regra vale para a atribuicao, para os argumentos de uma
+ * chamada (regra 6) e para o valor do retorne (regra 9).
+ *
+ * Parametros: destino - tipo da variavel, parametro ou funcao
+ *             origem  - tipo da expressao
+ * Retorno:    1 se pode, 0 se nao.
+ */
+int tipoAtribuivel(TokenNome destino, TokenNome origem)
+{
+      if (destino == origem)
+            return 1;
+      return destino == TOKEN_REAL && origem == TOKEN_INTEIRO;
+}
+
 /* ============================================================
  *  4. TRATAMENTO DE ERROS
  * ============================================================
@@ -1775,12 +1866,12 @@ void cmd_escreva(void);
 void cmd_retorne(void);
 int variavel(void);
 int argumentos(void);
-void expr(void);
-void expr_e(void);
-void expr_rel(void);
-void expr_arit(void);
-void termo(void);
-void fator(void);
+TokenNome expr(void);
+TokenNome expr_e(void);
+TokenNome expr_rel(void);
+TokenNome expr_arit(void);
+TokenNome termo(void);
+TokenNome fator(void);
 
 /*
  * argumentos -> expr { "," expr }
@@ -1815,16 +1906,25 @@ int argumentos(void)
  * menor precedencia da linguagem.
  *
  * Codigo gerado: <expr_e> <expr_e> DISJ   (1 = verdadeiro, 0 = falso)
+ *
+ * Verificacao semantica: regra 5 (os dois lados do OU sao logicos).
+ *
+ * Retorno: tipo da expressao (o de expr_e se nao houver OU; logico se
+ *          houver).
  */
-void expr(void)
+TokenNome expr(void)
 {
-      expr_e();
+      TokenNome tipo = expr_e();
       while (lookahead.type == TOKEN_OU)
       {
+            int linha = lookahead.line;
             consumir(TOKEN_OU);
-            expr_e();
+            TokenNome direita = expr_e();
+            if (tipo != TOKEN_LOGICO || direita != TOKEN_LOGICO)
+                  erroSemantico(linha, "operador logico exige operandos logicos");
             imprimir("DISJ");
       }
+      return tipo;
 }
 
 /*
@@ -1833,16 +1933,25 @@ void expr(void)
  * Operador logico E, que liga mais forte que o OU.
  *
  * Codigo gerado: <expr_rel> <expr_rel> CONJ
+ *
+ * Verificacao semantica: regra 5 (os dois lados do E sao logicos).
+ *
+ * Retorno: tipo da expressao (o de expr_rel se nao houver E; logico se
+ *          houver).
  */
-void expr_e(void)
+TokenNome expr_e(void)
 {
-      expr_rel();
+      TokenNome tipo = expr_rel();
       while (lookahead.type == TOKEN_E)
       {
+            int linha = lookahead.line;
             consumir(TOKEN_E);
-            expr_rel();
+            TokenNome direita = expr_rel();
+            if (tipo != TOKEN_LOGICO || direita != TOKEN_LOGICO)
+                  erroSemantico(linha, "operador logico exige operandos logicos");
             imprimir("CONJ");
       }
+      return tipo;
 }
 
 /*
@@ -1856,18 +1965,34 @@ void expr_e(void)
  *
  * Codigo gerado: <expr_arit> <expr_arit> CMxx, com CMxx escolhida pela
  * tabela instrucoesOpRel. A comparacao deixa 1 ou 0 na pilha.
+ *
+ * Verificacao semantica: regra 5. < > <= >= comparam so numeros
+ * (inteiro e real misturam); = e <> aceitam tambem dois valores do
+ * mesmo tipo (caractere com caractere, logico com logico).
+ *
+ * Retorno: tipo da expressao (o de expr_arit se nao houver comparacao;
+ *          logico se houver).
  */
-void expr_rel(void)
+TokenNome expr_rel(void)
 {
-      expr_arit();
+      TokenNome tipo = expr_arit();
       if (lookahead.type == TOKEN_OP_REL)
       {
-            /* o operador e guardado antes de consumir o token */
+            /* operador e linha guardados antes de consumir o token */
             OpRelType op = lookahead.attribute.op_code;
+            int linha = lookahead.line;
             consumir(TOKEN_OP_REL);
-            expr_arit();
+            TokenNome direita = expr_arit();
+
+            int numeros = ehNumerico(tipo) && ehNumerico(direita);
+            int igualdade = (op == OP_EQ || op == OP_NE);
+            if (!numeros && !(igualdade && tipo == direita))
+                  erroSemantico(linha, "comparacao entre tipos incompativeis");
+
             imprimir(instrucaoDoOpRel(op));
+            tipo = TOKEN_LOGICO;
       }
+      return tipo;
 }
 
 /*
@@ -1882,17 +2007,24 @@ void expr_rel(void)
  *
  * O "default" do switch evita o warning do -Wall para os valores do
  * enum que nunca chegam aqui.
+ *
+ * Verificacao semantica: regra 5 (os dois lados sao numeros), em
+ * tipoAritmetico.
+ *
+ * Retorno: tipo da expressao (real se algum operando for real).
  */
-void expr_arit(void)
+TokenNome expr_arit(void)
 {
-      termo();
+      TokenNome tipo = termo();
       while (lookahead.type == TOKEN_SOMA || lookahead.type == TOKEN_SUB)
       {
-            /* guarda o operador: depois do nextToken o lookahead ja e o
-             * operando da direita */
+            /* guarda operador e linha: depois do nextToken o lookahead ja
+             * e o operando da direita */
             TokenNome op = lookahead.type;
+            int linha = lookahead.line;
             nextToken();
-            termo();
+            TokenNome direita = termo();
+            tipo = tipoAritmetico(tipo, direita, linha);
 
             /* os dois operandos ja estao na pilha: agora vem a operacao */
             switch (op)
@@ -1907,6 +2039,7 @@ void expr_arit(void)
                         break;
             }
       }
+      return tipo;
 }
 
 /*
@@ -1917,10 +2050,16 @@ void expr_arit(void)
  *
  * Codigo gerado: <fator> <fator> MULT | DIVF | DIVI. O operador mod
  * nao e suportado na geracao de codigo e encerra a compilacao.
+ *
+ * Verificacao semantica: regra 5. "*" e "/" exigem numeros; "\" e mod
+ * exigem inteiros. Os tipos sao conferidos antes de emitir o codigo.
+ *
+ * Retorno: tipo da expressao. "*": real se algum lado for real; "/":
+ *          sempre real; "\" e mod: inteiro.
  */
-void termo(void)
+TokenNome termo(void)
 {
-      fator();
+      TokenNome tipo = fator();
       while (lookahead.type == TOKEN_MULT || lookahead.type == TOKEN_DIV
              || lookahead.type == TOKEN_DIV_INT || lookahead.type == TOKEN_MOD)
       {
@@ -1928,27 +2067,37 @@ void termo(void)
             TokenNome op = lookahead.type;
             int linha = lookahead.line;
             nextToken();
-            fator();
+            TokenNome direita = fator();
 
             switch (op)
             {
                   case TOKEN_MULT:
+                        tipo = tipoAritmetico(tipo, direita, linha);
                         imprimir("MULT");
                         break;
                   case TOKEN_DIV:
-                        imprimir("DIVF");   /* no Visualg "/" e sempre divisao real */
+                        /* no Visualg "/" e sempre divisao real */
+                        tipoAritmetico(tipo, direita, linha);
+                        tipo = TOKEN_REAL;
+                        imprimir("DIVF");
                         break;
                   case TOKEN_DIV_INT:
-                        imprimir("DIVI");
-                        break;
                   case TOKEN_MOD:
-                        /* a MEPA nao tem instrucao de resto (ver README) */
-                        naoSuportado(linha, "o operador mod");
+                        if (tipo != TOKEN_INTEIRO || direita != TOKEN_INTEIRO)
+                              erroSemantico(linha, "operadores \\ e mod exigem operandos inteiros");
+                        tipo = TOKEN_INTEIRO;
+
+                        if (op == TOKEN_DIV_INT)
+                              imprimir("DIVI");
+                        else
+                              /* a MEPA nao tem instrucao de resto (ver README) */
+                              naoSuportado(linha, "o operador mod");
                         break;
                   default:
                         break;
             }
       }
+      return tipo;
 }
 
 /*
@@ -1972,46 +2121,66 @@ void termo(void)
  *    "texto" ........... nada (tratado pelo escreva)
  *
  * Verificacoes semanticas: regra 1 (variavel simples declarada antes do
- * uso, via busca_tabela_simbolos), regra 7 (procedimento nao pode ser
- * usado em expressao) e quantidade de argumentos, em gerarChamada.
+ * uso, via busca_tabela_simbolos), regra 5 (menos unario so em numero),
+ * regra 7 (procedimento nao pode ser usado em expressao) e quantidade
+ * de argumentos, em gerarChamada.
+ *
+ * Retorno: tipo do fator. Literais tem tipo fixo (texto e caractere),
+ *          variavel tem o tipo da minitabela e chamada de funcao tem o
+ *          tipo de retorno declarado.
+ *
+ * O tipo e guardado numa variavel e devolvido num unico return no fim,
+ * pelo mesmo motivo de tipo_basico: o compilador nao sabe que
+ * erroSintatico nunca retorna.
  */
-void fator(void)
+TokenNome fator(void)
 {
+      TokenNome tipo = TOKEN_INTEIRO;
       switch (lookahead.type)
       {
             case TOKEN_NUM_INT:
                   /* o valor e lido antes de avancar para o proximo token */
                   imprimirInteiro("CRCT", lookahead.attribute.int_value);
                   nextToken();
+                  tipo = TOKEN_INTEIRO;
                   break;
             case TOKEN_NUM_FLOAT:
                   imprimirReal("CRCT", lookahead.attribute.float_value);
                   nextToken();
+                  tipo = TOKEN_REAL;
                   break;
             case TOKEN_STRING:
                   /* a MEPA nao tem instrucao para texto: a cadeia nao gera
                    * codigo, e o escreva deixa de emitir o IMPR dela */
                   nextToken();
+                  tipo = TOKEN_CARACTERE;
                   break;
             case TOKEN_VERDADEIRO:
                   imprimirInteiro("CRCT", 1);
                   nextToken();
+                  tipo = TOKEN_LOGICO;
                   break;
             case TOKEN_FALSO:
                   imprimirInteiro("CRCT", 0);
                   nextToken();
+                  tipo = TOKEN_LOGICO;
                   break;
             case TOKEN_SUB:
+            {
                   /* menos unario: primeiro o operando, depois o INVR */
+                  int linha = lookahead.line;
                   consumir(TOKEN_SUB);
-                  fator();
+                  tipo = fator();
+                  if (!ehNumerico(tipo))
+                        erroSemantico(linha, "menos unario exige operando numerico");
                   imprimir("INVR");
                   break;
+            }
             case TOKEN_ABRE_PAR:
                   /* os parenteses so mudam a ordem das chamadas: nao geram
                    * instrucao propria */
                   consumir(TOKEN_ABRE_PAR);
-                  expr();
+                  tipo = expr();
                   consumir(TOKEN_FECHA_PAR);
                   break;
             case TOKEN_ID:
@@ -2045,6 +2214,7 @@ void fator(void)
 
                         /* o retorno fica na posicao com o nome da funcao */
                         imprimirNome("CRVL", nomeDoSimbolo(r->nome));
+                        tipo = r->tipoRetorno;
                   }
                   else
                   {
@@ -2052,12 +2222,14 @@ void fator(void)
                         int endereco = busca_tabela_simbolos(nomeDoSimbolo(idx), linha);
                         usada[endereco] = 1;   /* regra 4 */
                         imprimirNome("CRVL", nomeDoSimbolo(idx));
+                        tipo = tipoDaVariavel(endereco);
                   }
                   break;
             }
             default:
                   erroSintatico(lookahead, "expressao");
       }
+      return tipo;
 }
 
 /*
@@ -2439,7 +2611,8 @@ void cmd_escreva(void)
  *    v[i] <- expr ....... nao suportado (vetores)
  *
  * Verificacoes semanticas: regra 1 (na atribuicao, a variavel de destino
- * tem de ter sido declarada, via busca_tabela_simbolos), regra 8 (funcao
+ * tem de ter sido declarada, via busca_tabela_simbolos), regra 5 (o tipo
+ * da expressao tem de caber no da variavel, via tipoAtribuivel), regra 8 (funcao
  * nao pode ser usada como procedimento) e identificador que nao e
  * procedimento usado como comando.
  */
@@ -2455,7 +2628,12 @@ void cmd_id(void)
              * dois sem declaracao, o erro aponta o y, que vem primeiro */
             int endereco = busca_tabela_simbolos(nomeDoSimbolo(idx), linha);
             atribuida[endereco] = 1;   /* regra 4 */
-            expr();
+            TokenNome tipoExpr = expr();
+
+            /* regra 5: o valor tem de caber no tipo da variavel */
+            if (!tipoAtribuivel(tipoDaVariavel(endereco), tipoExpr))
+                  erroSemantico(linha, "tipo incompativel na atribuicao");
+
             imprimirNome("ARMZ", nomeDoSimbolo(idx));
       }
       else if (lookahead.type == TOKEN_ABRE_COL)
