@@ -1735,19 +1735,49 @@ const char *nomeDoSimbolo(int indice)
  * sobre rotinas). Para uma funcao, quem chama emite depois o CRVL com
  * o nome dela para buscar o resultado.
  *
- * A quantidade de argumentos e conferida aqui (parte "numero" da regra
- * 6 do enunciado) porque, com a quantidade errada, os ARMZ sairiam
- * descasados.
+ * Verificacoes semanticas (regra 6 do enunciado), antes de emitir o
+ * codigo da chamada:
+ *
+ *   numero - a quantidade de argumentos tem de ser a de parametros;
+ *            com a quantidade errada, os ARMZ sairiam descasados.
+ *   tipo   - cada argumento tem de caber no parametro correspondente,
+ *            com a mesma regra da atribuicao (tipoAtribuivel): passar
+ *            um argumento e guardar um valor no parametro. Inteiro pode
+ *            ir para parametro real; real nao pode ir para inteiro.
+ *
+ * O numero e conferido primeiro: depois dele, numArgs == numParams e
+ * todas as posicoes de tipos lidas pelo laco foram preenchidas.
  *
  * Parametros: r       - rotina chamada
  *             numArgs - quantidade de argumentos da chamada
- *             linha   - linha da chamada, para a mensagem de erro
+ *             linha   - linha da chamada, para as mensagens de erro
+ *             tipos   - tipo de cada argumento, na ordem da chamada
+ *                       (preenchido por argumentos). Pode ser NULL
+ *                       quando numArgs e 0: nesse caso o laco de tipos
+ *                       nunca le o vetor (ou numParams e 0, ou o erro
+ *                       de quantidade encerra antes)
  */
-void gerarChamada(Rotina *r, int numArgs, int linha)
+void gerarChamada(Rotina *r, int numArgs, int linha, TokenNome tipos[])
 {
       if (numArgs != r->numParams)
             erroSemantico(linha, "quantidade de argumentos incompativel com a declaracao da rotina");
 
+      /* tipos: do primeiro para o ultimo, para o erro apontar o primeiro
+       * argumento errado. Destino e o parametro, origem e o argumento */
+      for (int i = 0; i < r->numParams; i++)
+      {
+            if (!tipoAtribuivel(r->tiposParams[i], tipos[i]))
+            {
+                  char mensagem[80];
+                  /* i + 1: para quem le o erro, o primeiro argumento e o 1 */
+                  snprintf(mensagem, sizeof mensagem,
+                           "tipo do argumento %d incompativel com o parametro",
+                           i + 1);
+                  erroSemantico(linha, mensagem);
+            }
+      }
+
+      /* do ultimo para o primeiro: o ARMZ retira o topo da pilha */
       for (int i = r->numParams - 1; i >= 0; i--)
             imprimirNome("ARMZ", nomeDoSimbolo(r->params[i]));
 
@@ -1865,7 +1895,7 @@ void cmd_leia(void);
 void cmd_escreva(void);
 void cmd_retorne(void);
 int variavel(void);
-int argumentos(void);
+int argumentos(TokenNome tipos[]);
 TokenNome expr(void);
 TokenNome expr_e(void);
 TokenNome expr_rel(void);
@@ -1883,17 +1913,34 @@ TokenNome fator(void);
  * O escreva nao usa esta funcao: ele percorre os proprios argumentos
  * para emitir um IMPR depois de cada um (ver cmd_escreva).
  *
- * Retorno: quantidade de argumentos, conferida com a declaracao da
- *          rotina em gerarChamada.
+ * O tipo de cada argumento (devolvido por expr) e guardado em tipos,
+ * para gerarChamada conferir com os parametros (regra 6). O vetor e
+ * declarado por quem chama, dentro do bloco da chamada: numa chamada
+ * aninhada como f(g(1), 2), g e chamada no meio dos argumentos de f, e
+ * cada uma precisa do seu proprio vetor.
+ *
+ * Parametro: tipos - recebe o tipo de cada argumento, na ordem; deve ter
+ *                    MAX_PARAMS posicoes
+ * Retorno:   quantidade de argumentos, conferida com a declaracao da
+ *            rotina em gerarChamada.
  */
-int argumentos(void)
+int argumentos(TokenNome tipos[])
 {
       int contador = 1;
-      expr();
+      tipos[0] = expr();
       while (lookahead.type == TOKEN_VIRGULA)
       {
             consumir(TOKEN_VIRGULA);
-            expr();
+
+            /* expr e chamada sempre, mesmo sem espaco no vetor: e ela que
+             * consome os tokens do argumento e emite o codigo dele */
+            TokenNome tipo = expr();
+
+            /* so grava se couber: com argumentos demais a contagem segue,
+             * e gerarChamada da o erro de quantidade */
+            if (contador < MAX_PARAMS)
+                  tipos[contador] = tipo;
+
             contador++;
       }
       return contador;
@@ -2208,9 +2255,11 @@ TokenNome fator(void)
                               erroSemantico(linha, "procedimento nao pode ser usado em expressao");
 
                         consumir(TOKEN_ABRE_PAR);
-                        int numArgs = argumentos();
+
+                        TokenNome tipos[MAX_PARAMS];
+                        int numArgs = argumentos(tipos);
                         consumir(TOKEN_FECHA_PAR);
-                        gerarChamada(r, numArgs, linha);
+                        gerarChamada(r, numArgs, linha, tipos);
 
                         /* o retorno fica na posicao com o nome da funcao */
                         imprimirNome("CRVL", nomeDoSimbolo(r->nome));
@@ -2654,9 +2703,11 @@ void cmd_id(void)
                   erroSemantico(linha, "funcao nao pode ser usada como procedimento");
 
             consumir(TOKEN_ABRE_PAR);
-            int numArgs = argumentos();
+
+            TokenNome tipos[MAX_PARAMS];
+            int numArgs = argumentos(tipos);
             consumir(TOKEN_FECHA_PAR);
-            gerarChamada(r, numArgs, linha);
+            gerarChamada(r, numArgs, linha, tipos);
       }
       else
       {
@@ -2666,7 +2717,7 @@ void cmd_id(void)
             if (r->ehFuncao)
                   erroSemantico(linha, "funcao nao pode ser usada como procedimento");
 
-            gerarChamada(r, 0, linha);
+            gerarChamada(r, 0, linha, NULL);
       }
 }
 

@@ -83,14 +83,14 @@ A geração de código é **dirigida pela sintaxe**: o próprio parser descenden
 
 Algumas regras são necessárias para que a geração de código seja correta, por isso foram implementadas junto com ela:
 
-- **Regra 6 (parcial):** a **quantidade** de argumentos de uma chamada deve ser igual à de parâmetros da rotina.
+- **Regra 6:** a **quantidade** de argumentos de uma chamada deve ser igual à de parâmetros da rotina (verificada junto com a geração de código, porque com a quantidade errada os `ARMZ` sairiam descasados). A conferência do **tipo** de cada argumento foi acrescentada depois, na análise semântica.
 - **Regra 7:** procedimento não pode ser usado em expressão.
 - **Regra 8:** função não pode ser usada como procedimento.
 - `retorne` fora de uma função.
 - Identificador usado como rotina sem ter sido declarado como rotina.
 - `passo` do `para` igual a zero ou não constante.
 
-A tabela de rotinas já guarda os **tipos** dos parâmetros e o **tipo de retorno**, para que a checagem de tipos (regra 6 completa e regra 9) possa usá-los.
+A tabela de rotinas guarda os **tipos** dos parâmetros e o **tipo de retorno**, usados pela análise semântica na conferência de tipos dos argumentos (regra 6) e do retorno (regra 9).
 
 ---
 
@@ -241,6 +241,7 @@ Na parte de análise semântica, a IA foi usada para:
 - escrever a documentação;
 - verificar se a implementação corresponde ao que o enunciado pede;
 - depurar erros.
+- Criação dos testes.
 
 ### 8.4 Instruções de rotina (`CHPR`, `ENPR`, `RTPR`)
 
