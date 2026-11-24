@@ -1,0 +1,9 @@
+algoritmo "CondicaoSe"
+var
+x: inteiro
+inicio
+x <- 1
+se x entao
+   escreval(x)
+fimse
+fimalgoritmo

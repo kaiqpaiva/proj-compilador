@@ -1,40 +1,24 @@
-# Compilador MiniVisualg — Fase 2: Geração de Código MEPA
+# Compilador MiniVisualg — Fase 2: Análise Semântica e Geração de Código MEPA
 
 **Integrantes:**
 - Caio Ariel Cardoso Saraiva — RA 10439611
 - Isabela Hissa Pinto — RA 10441873
 - Kaique Barros Paiva — RA 10441787
 
-Este documento descreve a parte de **geração de código intermediário (MEPA)** da Fase 2, as decisões de projeto, as limitações conhecidas e o uso de Inteligência Artificial no desenvolvimento.
+Este documento descreve a Fase 2: a geração de código MEPA, as verificações semânticas e como as duas se integram, além das limitações, dos testes e do uso de IA. As decisões de projeto da análise semântica estão no [README](../README.md), seção 3.
 
 ---
 
 ## 1. Como compilar e executar
 
-Compilação (comando do enunciado, sem nenhum warning):
-
 ```
 gcc -g -Og -Wall compilador.c -o compilador
-```
-
-Execução:
-
-```
 ./compilador testes/validos/15_rotinas.alg
 ```
 
-Saídas:
+A listagem de tokens e o resultado vão para `saida_tokens.txt`, e o código MEPA para `saida_mepa.txt`. Em qualquer erro, o compilador mostra a mensagem com a linha, encerra e **apaga o `saida_mepa.txt`**, para que nunca sobre um arquivo incompleto que pareça válido.
 
-| Arquivo | Conteúdo |
-|---|---|
-| `saida_tokens.txt` | listagem de tokens e resultado da análise (Fase 1) |
-| `saida_mepa.txt` | código MEPA gerado (Fase 2) |
-
-Em qualquer erro (léxico, sintático, semântico ou recurso não suportado), o compilador mostra a mensagem com a linha do fonte, encerra e **apaga o `saida_mepa.txt`**, para que nunca sobre um arquivo MEPA incompleto que pareça válido.
-
-### Executando o código gerado
-
-O enunciado não fornece uma máquina virtual MEPA. Para testar, foi criado o interpretador `ferramentas/mepa.py` (ver seção 7):
+Para executar o código gerado, use o interpretador `ferramentas/mepa.py` (seção 7):
 
 ```
 python3 ferramentas/mepa.py saida_mepa.txt                 # executa
@@ -46,13 +30,13 @@ python3 ferramentas/mepa.py saida_mepa.txt --entrada 4,7   # valores para os LEI
 
 ## 2. O que foi implementado
 
-A geração de código é **dirigida pela sintaxe**: o próprio parser descendente recursivo da Fase 1 emite as instruções MEPA enquanto reconhece cada construção, numa única passagem. As variáveis são referenciadas **pelos seus nomes**, como pede o enunciado.
+A geração de código é **dirigida pela sintaxe**: o parser descendente recursivo da Fase 1 emite as instruções MEPA enquanto reconhece cada construção, numa única passagem. As variáveis são referenciadas **pelos nomes**, como pede o enunciado.
 
 ### 2.1 Infraestrutura
 
-- Funções de emissão por formato de operando: `imprimir`, `imprimirNome`, `imprimirInteiro`, `imprimirReal`, `imprimirDoisInteiros`, `imprimirDesvio` e `imprimirRotulo`.
+- Uma função de emissão por formato de operando: `imprimir`, `imprimir_nome`, `imprimir_inteiro`, `imprimir_real`, `imprimir_dois_inteiros`, `imprimir_desvio` e `imprimir_rotulo`.
 - `proximo_rotulo()`, como sugerido no enunciado: devolve 1, 2, 3… a partir de um contador `static`.
-- `sairComErro()`: centraliza o fechamento dos arquivos e a remoção do MEPA incompleto em todos os erros.
+- `sair_com_erro()`: fecha os arquivos e apaga o MEPA incompleto em todos os erros.
 
 ### 2.2 Tradução de cada construção
 
@@ -79,46 +63,38 @@ A geração de código é **dirigida pela sintaxe**: o próprio parser descenden
 | chamada de função em expressão | o mesmo + `CRVL nomeDaFuncao` |
 | `retorne` | expressão, `ARMZ nomeDaFuncao`, `RTPR 1,0` |
 
-### 2.3 Verificações semânticas feitas nesta parte
+### 2.3 Verificações semânticas
 
-Algumas regras são necessárias para que a geração de código seja correta, por isso foram implementadas junto com ela:
+As 9 regras do enunciado estão implementadas, e todas encerram a compilação com `linha# ERRO SEMANTICO: <motivo>`.
 
-- **Regra 6:** a **quantidade** de argumentos de uma chamada deve ser igual à de parâmetros da rotina (verificada junto com a geração de código, porque com a quantidade errada os `ARMZ` sairiam descasados). A conferência do **tipo** de cada argumento foi acrescentada depois, na análise semântica.
-- **Regra 7:** procedimento não pode ser usado em expressão.
-- **Regra 8:** função não pode ser usada como procedimento.
-- `retorne` fora de uma função.
-- Identificador usado como rotina sem ter sido declarado como rotina.
-- `passo` do `para` igual a zero ou não constante.
+| Regra do enunciado | Onde é verificada |
+|---|---|
+| 1. Variável declarada antes do uso | `busca_tabela_simbolos`, em todo uso de variável (`fator`, `cmd_id`, `variavel` e `cmd_para`) |
+| 2. Palavra reservada não pode ser nome de variável | `registrar_id`, `parametro` e `secao_var` |
+| 3. Identificador único e com tipo fixo | `inserir_var_semant`, `registrar_var`, `procedimento` e `funcao` |
+| 4. Variável declarada e atribuída deve ser usada | `conferir_variaveis_nao_usadas`, no fim de `programa` |
+| 5. Tipos compatíveis nas expressões | as funções de expressão devolvem o tipo e cada operador confere os dois lados; também a atribuição, as condições e o `para` |
+| 6. Tipo e número dos argumentos | `gerar_chamada`: primeiro a quantidade, depois o tipo de cada argumento |
+| 7. Procedimento não pode ser usado em expressão | `fator` |
+| 8. Função não pode ser usada como procedimento | `cmd_id` |
+| 9. Retorno compatível com a declaração | `cmd_retorne` (tipo do valor) e `funcao` (precisa ter algum `retorne`) |
 
-A tabela de rotinas guarda os **tipos** dos parâmetros e o **tipo de retorno**, usados pela análise semântica na conferência de tipos dos argumentos (regra 6) e do retorno (regra 9).
+O compilador também dá erro semântico para `retorne` fora de uma função, identificador usado como rotina sem ter sido declarado como rotina e `passo` do `para` igual a zero ou não constante.
 
 ---
 
-## 3. Decisões de projeto
+## 3. Decisões de projeto da geração de código
 
-1. **Expressões em notação pós-fixa sem conversão explícita.** O operador é guardado numa variável local antes de consumir o token e só é emitido depois do segundo operando; a recursão do parser já produz a ordem pós-fixa.
-
-2. **Rótulos pedidos no começo de cada comando e guardados em variáveis locais.** Atende ao aviso do enunciado sobre a recursão: um `se` dentro de outro pede os seus próprios rótulos sem sobrescrever os do externo.
-
-3. **`se` sempre pede dois rótulos.** Sem `senao`, o segundo não é usado e a numeração fica com uma lacuna, o que não afeta a execução (cada rótulo continua único).
-
-4. **`DSVS` no início do programa é emitido sempre**, mesmo sem rotinas, para manter o código uniforme. O código das rotinas fica entre o `INPP` e o `AMEM`, e é pulado por esse desvio.
-
-5. **`AMEM` conta posições de memória:** cada variável simples ocupa 1 posição, um vetor ocupa `fim - inicio + 1`, cada parâmetro ocupa 1 e cada função ocupa mais 1 para o valor de retorno.
-
-6. **Textos (`"..."`) não geram código**, porque a MEPA não tem instrução para cadeias. O `escreva` percorre os seus argumentos com um laço próprio e só emite `IMPR` para os que não são texto (por isso não usa a função `argumentos()`, que também serve às chamadas de rotina).
-
-7. **`escreva` e `escreval` geram o mesmo código**, porque a MEPA não tem instrução de quebra de linha.
-
-8. **`passo` do `para` apenas como constante inteira** (`2` ou `-2`). O valor é lido direto do token, sem gerar código, porque no fonte o passo aparece **antes** do corpo, mas o incremento precisa ser emitido **depois** dele. Como o sinal é conhecido na compilação, ele escolhe a comparação: `CMEG` (passo positivo) ou `CMAG` (passo negativo).
-
-9. **Rotinas com parâmetros em posições de memória com nome.** Cada parâmetro é uma posição global, acessada pelo nome (`CRVL n`), e o valor de retorno de uma função fica numa posição com o nome dela. Essa escolha mantém a exigência de referenciar variáveis pelo nome e é segura porque o enunciado exige identificadores **únicos em todo o código** e as rotinas da linguagem não têm variáveis locais. A alternativa (parâmetros na pilha com níveis léxicos e deslocamentos) foi descartada por não usar nomes.
-
-10. **Os argumentos são armazenados do último para o primeiro.** Os argumentos são empilhados na ordem; como o `ARMZ` retira o topo, o primeiro `ARMZ` vai para o último parâmetro.
-
-11. **Tabela de rotinas própria (`Rotina`).** A minitabela `TNo` do enunciado guarda apenas variáveis. As rotinas ficam num vetor fixo (`MAX_ROTINAS`, `MAX_PARAMS`), com verificação de limite.
-
-12. **Recursos não suportados param a compilação com uma mensagem própria** (`NAO SUPORTADO`), em vez de gerar um `saida_mepa.txt` incorreto em silêncio.
+1. **Expressões em ordem pós-fixa sem conversão explícita.** O operador é guardado antes de consumir o token e só é emitido depois do segundo operando; a recursão do parser já produz a ordem pós-fixa.
+2. **Rótulos pedidos no começo de cada comando e guardados em variáveis locais**, como alerta o enunciado: um `se` dentro de outro pede os próprios rótulos sem sobrescrever os do externo. O `se` sempre pede dois; sem `senao`, o segundo fica sem uso, o que não afeta a execução.
+3. **`DSVS` no início do programa sempre**, mesmo sem rotinas: o código das rotinas fica entre o `INPP` e o `AMEM` e é pulado por esse desvio.
+4. **`AMEM` conta posições de memória:** 1 por variável simples, `fim - inicio + 1` por vetor, 1 por parâmetro e mais 1 por função, para o valor de retorno.
+5. **Textos não geram código**, porque a MEPA não tem instrução para cadeias. O `escreva` só emite `IMPR` para os argumentos que não são texto (por isso tem um laço próprio, em vez de usar `argumentos()`). Fora do `escreva`, um texto é recurso não suportado (seções 4 e 5).
+6. **`escreva` e `escreval` geram o mesmo código**, porque a MEPA não tem quebra de linha.
+7. **`passo` do `para` só como constante inteira.** No fonte o passo vem **antes** do corpo, mas o incremento precisa ser emitido **depois** dele; por isso o valor é lido direto do token. O sinal escolhe a comparação: `CMEG` (positivo) ou `CMAG` (negativo).
+8. **Parâmetros em posições de memória com nome.** Cada parâmetro é uma posição global acessada pelo nome (`CRVL n`), e o retorno de uma função fica numa posição com o nome dela. Isso mantém a exigência de referenciar variáveis pelo nome e funciona porque os identificadores são únicos em todo o código e as rotinas não têm variáveis locais. Parâmetros na pilha, com níveis léxicos, foram descartados por não usarem nomes.
+9. **Argumentos armazenados do último para o primeiro**, porque o `ARMZ` retira o topo da pilha, onde está o último argumento.
+10. **Recursos não suportados param a compilação** com `NAO SUPORTADO`, em vez de gerar um `saida_mepa.txt` incorreto em silêncio.
 
 ---
 
@@ -126,25 +102,25 @@ A tabela de rotinas guarda os **tipos** dos parâmetros e o **tipo de retorno**,
 
 | Limitação | Comportamento |
 |---|---|
-| **Operador `mod`** | `linha# NAO SUPORTADO: geracao de codigo para o operador mod`. A MEPA não tem instrução de resto, e a fórmula `a - (a \ b) * b` exigiria duplicar valores que já estão na pilha. |
-| **Uso de vetores** (`v[i]` em expressão, atribuição e `leia`) | `linha# NAO SUPORTADO: geracao de codigo para vetores`. A MEPA dos slides não tem acesso indexado. A **declaração** de vetores funciona, e o `AMEM` reserva as posições. |
-| **Recursão** | Compila, mas não executa corretamente: como os parâmetros são posições globais, uma chamada recursiva sobrescreve os parâmetros da chamada anterior. |
-| **Textos e variáveis `caractere`** | Textos no `escreva` são ignorados na geração; `LEIT` e `IMPR` trabalham apenas com números. |
-| **Quebra de linha do `escreval`** | Não representável na MEPA (igual ao `escreva`). |
-| **`passo` não constante** | Erro semântico. |
-| **Instruções de rotina** | `CHPR`, `ENPR` e `RTPR` não aparecem nos slides da disciplina; foram usadas no formato do livro de onde a MEPA se origina (ver seção 8). |
+| **Operador `mod`** | `linha# NAO SUPORTADO: geracao de codigo para o operador mod`. A MEPA não tem instrução de resto, e a fórmula `a - (a \ b) * b` usa cada operando duas vezes, mas a MEPA não tem instrução para duplicar o topo da pilha. |
+| **Vetores** (`v[i]` em expressão, atribuição e `leia`) | `linha# NAO SUPORTADO: geracao de codigo para vetores`. A MEPA dos slides não tem acesso indexado. A **declaração** funciona, e o `AMEM` reserva as posições. |
+| **Textos e `caractere`** | Um texto sozinho no `escreva` é ignorado. Em qualquer outro uso (atribuição como `nome <- "Ana"`, argumento, `retorne` ou comparação), o valor faltaria na pilha, então o compilador para com `NAO SUPORTADO: geracao de codigo para textos fora do escreva`. Variáveis `caractere` podem ser declaradas, lidas, copiadas e comparadas, mas `LEIT` e `IMPR` trabalham só com números. |
+| **Recursão** | Compila, mas não executa corretamente: como os parâmetros são posições globais, a chamada recursiva sobrescreve os da chamada anterior. |
+| **Quebra de linha do `escreval`** | Não representável na MEPA. |
+| **Instruções de rotina** | `CHPR`, `ENPR` e `RTPR` não aparecem nos slides; foram usadas no formato do livro de onde a MEPA se origina (seção 8.4). |
 
-Por causa das duas primeiras limitações, os testes da Fase 1 `05_repeticao_vetor.alg` (vetores) e `06_procedimento_funcao.alg` (`mod`) continuam válidos para as análises léxica e sintática, mas param na geração de código com a mensagem de "não suportado".
+Por causa dos vetores, o teste `05_repeticao_vetor.alg` passa nas análises, mas para na geração de código. Nos testes `03_operadores.alg` e `06_procedimento_funcao.alg`, o `mod` foi trocado no fonte pela fórmula `a - (a \ b) * b`, e eles executam por inteiro.
 
 ---
 
-## 5. Integração com as demais partes da Fase 2
+## 5. Integração da análise semântica com a geração de código
 
-Partes da análise semântica sob responsabilidade dos outros integrantes, que se integram com a geração:
+As duas acontecem na mesma passagem, dentro das funções do parser, sempre na mesma ordem: **primeiro a verificação, depois a emissão**. Assim, nenhuma instrução é gerada para uma construção inválida.
 
-- minitabela de símbolos `TNo` em lista encadeada e `busca_tabela_simbolos()`;
-- variável declarada antes do uso, palavra reservada como nome, identificador único e de tipo fixo, variável declarada e atribuída que não é usada;
-- tipos compatíveis em expressões e **tipos** dos argumentos e do retorno (a tabela de rotinas já guarda essas informações).
+- **Minitabela `TNo`:** variáveis e parâmetros entram na declaração (`decl_var` e `parametro`, via `registrar_var`), e todo `CRVL` ou `ARMZ` de variável é precedido por `busca_tabela_simbolos`.
+- **Tabela de rotinas:** guarda o rótulo (usado no `CHPR`), o nome e o tipo de cada parâmetro (usados nos `ARMZ` da chamada e na regra 6) e o tipo de retorno (regra 9).
+- **Tipos:** as funções de expressão (`expr` até `fator`) emitem o código e devolvem o tipo, e quem usa o valor confere o tipo antes de emitir a instrução seguinte.
+- **Textos:** como um texto não gera código, o contador `textos_sem_codigo` marca as expressões que contêm texto. Ele é consultado **depois** da conferência de tipos, para que `x <- "texto"` com `x` inteiro continue sendo erro de tipo, e não "não suportado".
 
 ---
 
@@ -154,6 +130,8 @@ Partes da análise semântica sob responsabilidade dos outros integrantes, que s
 
 | Teste | O que verifica | Saída esperada no `mepa.py` |
 |---|---|---|
+| `03_operadores` | lógicos, divisão inteira, resto pela fórmula `a - (a \ b) * b`, `<>` | `1 4 2 1` |
+| `06_procedimento_funcao` | procedimento sem parâmetros e função lógica com `retorne` dentro de `se` | `14 1` |
 | `07_amem_varias_secoes` | `AMEM` com várias seções `var` e vetores | `AMEM 14` |
 | `08_amem_parametros` | parâmetros e retorno entram no `AMEM` | `AMEM 4` |
 | `09_expressoes` | precedência, associatividade, unário, divisões e lógicos | variáveis: `x1=14 x2=20 x3=3 x4=-5 x5=3 r1=3.5 r2=3.0 l1=0 l2=1` |
@@ -166,6 +144,8 @@ Partes da análise semântica sob responsabilidade dos outros integrantes, que s
 
 ### Erros (pasta `testes/erros/`)
 
+Os testes léxicos e sintáticos estão no [README](../README.md), seção 2. Os semânticos e de recurso não suportado são estes; em todos, o `saida_mepa.txt` é apagado:
+
 | Teste | Mensagem |
 |---|---|
 | `semantico_passo_zero` | `passo do para nao pode ser zero` |
@@ -174,8 +154,23 @@ Partes da análise semântica sob responsabilidade dos outros integrantes, que s
 | `semantico_funcao_como_procedimento` | `funcao nao pode ser usada como procedimento` |
 | `semantico_procedimento_em_expressao` | `procedimento nao pode ser usado em expressao` |
 | `semantico_numero_argumentos` | `quantidade de argumentos incompativel com a declaracao da rotina` |
-
-Em todos os testes de erro, o `saida_mepa.txt` não existe ao final da execução.
+| `semantico_nao_declarada` | `variavel nao declarada` |
+| `semantico_palavra_reservada` | `palavra reservada nao pode ser usada como nome de variavel` |
+| `semantico_redeclaracao` | `variavel declarada mais de uma vez` |
+| `semantico_variavel_nome_rotina` | `nome ja usado por uma rotina` |
+| `semantico_rotina_nome_variavel` | `nome ja usado por uma variavel` |
+| `semantico_rotina_duplicada` | `rotina declarada mais de uma vez` |
+| `semantico_nao_usada` | `variavel x recebe valor mas nunca e usada` |
+| `semantico_tipos_expressao` | `operador aritmetico exige operandos numericos` |
+| `semantico_tipo_atribuicao` | `tipo incompativel na atribuicao` |
+| `semantico_condicao_se` | `condicao do se deve ser logica` |
+| `semantico_condicao_enquanto` | `condicao do enquanto deve ser logica` |
+| `semantico_para_variavel_real` | `variavel de controle do para deve ser inteira` |
+| `semantico_para_limite` | `limite do para deve ser inteiro` |
+| `semantico_tipo_argumento` | `tipo do argumento 1 incompativel com o parametro` |
+| `semantico_tipo_retorno` | `tipo do retorno incompativel com a declaracao da funcao` |
+| `semantico_funcao_sem_retorne` | `funcao sem retorne` |
+| `naosuportado_texto_atribuicao` | `NAO SUPORTADO: geracao de codigo para textos fora do escreva` |
 
 ---
 
@@ -183,37 +178,35 @@ Em todos os testes de erro, o `saida_mepa.txt` não existe ao final da execuçã
 
 ### 7.1 Por que foi preciso uma máquina virtual
 
-O enunciado pede que o arquivo TXT gerado "seja executado na máquina virtual MEPA", mas nenhuma máquina virtual foi fornecida junto com o projeto. Sem uma forma de executar o código, a única verificação possível seria conferir o `saida_mepa.txt` à mão, linha por linha, o que não é viável para programas com laços aninhados e rotinas.
+O enunciado pede que o TXT gerado seja executado na máquina virtual MEPA, mas nenhuma foi fornecida. Sem uma VM, a única verificação possível seria conferir o `saida_mepa.txt` à mão, o que não é viável para programas com laços aninhados e rotinas.
 
 ### 7.2 A VM encontrada: `maquina-virtual-mepa`, de HugoJF
 
-Procurando no GitHub por uma implementação pública da MEPA, encontramos o repositório **`HugoJF/maquina-virtual-mepa`** (https://github.com/HugoJF/maquina-virtual-mepa), com uma versão executável no navegador em https://hugojf.github.io/maquina-virtual-mepa/mepa.html. É um projeto independente, de terceiros, feito em JavaScript. Segundo o próprio README do projeto, a implementação foi feita a partir de trechos de um livro, sem identificar a obra. Pelo conjunto e pelo formato das instruções (por exemplo, `CRVL k,n` com nível léxico e deslocamento), trata-se da MEPA do livro de Tomasz Kowaltowski (ver seção 8.4).
+Encontramos no GitHub o repositório **`HugoJF/maquina-virtual-mepa`** (https://github.com/HugoJF/maquina-virtual-mepa), um projeto de terceiros em JavaScript, com versão no navegador em https://hugojf.github.io/maquina-virtual-mepa/mepa.html. Pelo formato das instruções (por exemplo, `CRVL k,n` com nível léxico e deslocamento), trata-se da MEPA do livro de Tomasz Kowaltowski (seção 8.4).
 
-Testamos essa VM com programas escritos à mão e encontramos estas limitações:
+Nos testes, ela mostrou estas limitações:
 
-- **Formato diferente do enunciado:** não aceita variáveis pelo nome (`CRVL a`), apenas o formato com nível e deslocamento (`CRVL 0,2`).
-- **`MULT` grafado como `MULTI`:** a multiplicação no formato padrão não é reconhecida.
-- **Não tem `DIVF`** (divisão real).
-- **`LEIT` não lê do teclado:** empilha um número aleatório entre 0 e 10.
-- **Não permite acompanhar a execução:** o botão de executar uma instrução por vez não atualiza a tela, e as pilhas nunca são exibidas; o rastro só aparece no console do navegador.
+- não aceita variáveis pelo nome (`CRVL a`), só nível e deslocamento (`CRVL 0,2`);
+- grafa a multiplicação como `MULTI` e não tem `DIVF`;
+- o `LEIT` empilha um número aleatório entre 0 e 10, em vez de ler do teclado;
+- não mostra as pilhas nem permite executar uma instrução por vez.
 
-Ou seja, para usá-la seria preciso converter manualmente cada `saida_mepa.txt` (nomes para `0,endereco`, `MULT` para `MULTI`), e ainda assim não seria possível testar leitura de dados nem divisão real.
+Para usá-la, seria preciso converter cada `saida_mepa.txt` à mão, e ainda assim não daria para testar leitura nem divisão real.
 
 ### 7.3 A ferramenta `ferramentas/mepa.py`
 
-Por isso foi escrito um interpretador MEPA próprio, em Python 3 e sem dependências, usado **apenas para testar** o código gerado; ele **não faz parte do compilador**. Ele:
+Por isso foi escrito um interpretador MEPA próprio, em Python 3 e sem dependências, usado **apenas para testar** o código gerado (ele **não faz parte do compilador**). Ele:
 
-- lê diretamente o formato gerado pelo compilador (variáveis por nome e rótulos `Ln: NADA`), sem nenhuma conversão;
-- executa todas as instruções usadas, inclusive `DIVF` e as de rotina (`CHPR`, `ENPR`, `RTPR`), e aceita também o formato da VM de HugoJF (`CRVL 0,2`, `MULTI`), para comparação;
-- lê de verdade os valores do `LEIT`, pelo teclado ou pela opção `--entrada`;
-- mostra a pilha e as variáveis depois de cada instrução com `--trace`;
-- acusa com a linha do arquivo os erros que indicariam código gerado errado: rótulo não definido, pilha vazia, `CRCT` com nome de variável, variável fora da área reservada pelo `AMEM`, `RTPR` fora de uma rotina, divisão por zero e laço infinito.
+- lê o formato gerado pelo compilador (variáveis por nome e rótulos `Ln: NADA`) sem conversão, e aceita também o formato da VM de HugoJF;
+- executa todas as instruções usadas, inclusive `DIVF` e as de rotina;
+- lê os valores do `LEIT` pelo teclado ou pela opção `--entrada`, e mostra a pilha a cada instrução com `--trace`;
+- acusa com a linha do arquivo os erros que indicariam código gerado errado: rótulo não definido, pilha vazia, variável fora da área do `AMEM`, `RTPR` fora de uma rotina, divisão por zero e laço infinito.
 
 ---
 
 ## 8. Uso de Inteligência Artificial
 
-Conforme exigido pelo enunciado, informamos que a ferramenta **Claude (Anthropic)** foi usada no desenvolvimento da parte de geração de código. O uso se deu principalmente como **tutor e revisor**: a maior parte do código foi escrita pelo integrante e depois revisada pela IA. Todo o código foi lido, testado e compreendido antes de ser incorporado.
+Conforme exigido pelo enunciado, informamos que a ferramenta **Claude (Anthropic)** foi usada no desenvolvimento da parte de geração de código. O uso se deu principalmente como **tutor e revisor**: a maior parte do código foi escrita pelo integrante e depois revisada pela IA.
 
 ### 8.1 Como a IA foi usada
 
@@ -223,14 +216,11 @@ Conforme exigido pelo enunciado, informamos que a ferramenta **Claude (Anthropic
 - **Revisão de código:** cada função escrita foi revisada, com a indicação de erros de compilação, warnings do `-Wall` e erros de lógica.
 - **Testes:** sugestão dos programas de teste e dos resultados esperados, e conferência das execuções.
 
-### 8.2 Trechos mais críticos com participação direta da IA
+### 8.2 Trechos com maior com participação da IA
 
 - **Ordem de emissão nas expressões:** a necessidade de guardar o operador, o `op_code`, o valor numérico e o índice do identificador **antes** de consumir o token foi apontada pela IA; o código foi escrito pelo integrante e revisado.
 - **`cmd_para`:** a decisão de ler o passo direto do token (o passo aparece antes do corpo no fonte, mas o incremento precisa vir depois) e a escolha entre `CMEG` e `CMAG` pelo sinal foram propostas pela IA.
-- **Rotinas:** a estratégia de parâmetros como posições de memória com nome, o retorno guardado no nome da função, a ordem reversa dos `ARMZ` na chamada e a estrutura `Rotina` foram propostos pela IA.
-- **Correções apontadas pela IA:** contagem de identificadores em `lista_ids` (contava um a menos), declaração logo após um `case` (não compila em gcc anterior à versão 11), ausência de `default` em `switch` sobre enum (gera warning com `-Wall`), retorno do `fread` ignorado (warning com o comando do enunciado), formato do `imprimirDoisInteiros` e posição da leitura do tipo de retorno na `funcao`.
-- **`naoSuportado` e os pontos de verificação de vetores e `mod`:** fornecidos pela IA.
-- **`ferramentas/mepa.py`:** escrito integralmente pela IA, como ferramenta de teste.
+- **`ferramentas/mepa.py`:** e **Rotinas:** escrito em conjunto com IA.
 
 ### 8.3 Análise semântica (minitabela de símbolos)
 
@@ -240,7 +230,7 @@ Na parte de análise semântica, a IA foi usada para:
 - navegar entre as seções do `compilador.c`;
 - escrever a documentação;
 - verificar se a implementação corresponde ao que o enunciado pede;
-- depurar erros.
+- depurar erros e auxílio para implementação de partes isoladas;
 - Criação dos testes.
 
 ### 8.4 Instruções de rotina (`CHPR`, `ENPR`, `RTPR`)

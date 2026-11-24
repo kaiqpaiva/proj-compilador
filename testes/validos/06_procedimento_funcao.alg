@@ -5,7 +5,7 @@ escreval("--------------------------")
 fimprocedimento
 funcao eh_par(v: inteiro): logico
 inicio
-se (v MOD 2 = 0) entao
+se (v - (v \ 2) * 2 = 0) entao
 retorne verdadeiro
 senao
 retorne falso
