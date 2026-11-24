@@ -1066,6 +1066,56 @@ int tipoAtribuivel(TokenNome destino, TokenNome origem)
       return destino == TOKEN_REAL && origem == TOKEN_INTEIRO;
 }
 
+/* ------------------------------------------------------------
+ *  Fase 2 - palavra reservada como nome de variavel (regra 2)
+ * ------------------------------------------------------------
+ *  O lexico transforma "se" em TOKEN_SE antes de o parser ver o token,
+ *  entao uma declaracao como "se: inteiro" nunca chega como TOKEN_ID.
+ *  Sem tratamento, o parser so via "faltou o INICIO" e dava um erro
+ *  sintatico. Como o enunciado classifica a regra como semantica, os
+ *  pontos onde se espera o nome de uma variavel (registrarId, parametro
+ *  e o laco de secao_var) reconhecem a palavra reservada e dao o erro
+ *  semantico correspondente.
+ * ------------------------------------------------------------ */
+
+/* ehPalavraReservada depende de as palavras reservadas estarem em
+ * sequencia no enum, de TOKEN_ALGORITMO ate TOKEN_MOD. Se alguem
+ * acrescentar um token fora dessa faixa, a compilacao quebra aqui em
+ * vez de a funcao passar a errar em silencio. */
+_Static_assert(TOKEN_PONTO_PONTO + 1 == TOKEN_ALGORITMO,
+               "TOKEN_ALGORITMO deve ser a primeira palavra reservada do enum");
+_Static_assert(TOKEN_MOD + 1 == TOKEN_TOTAL,
+               "TOKEN_MOD deve ser a ultima palavra reservada do enum");
+
+/*
+ * ehPalavraReservada
+ * ------------------------------------------------------------
+ * Diz se um token e uma palavra reservada da linguagem.
+ *
+ * Parametro: t - tipo do token
+ * Retorno:   1 se e palavra reservada, 0 caso contrario.
+ */
+int ehPalavraReservada(TokenNome t)
+{
+      return t >= TOKEN_ALGORITMO && t <= TOKEN_MOD;
+}
+
+/*
+ * recusarPalavraReservada
+ * ------------------------------------------------------------
+ * Chamada onde o parser espera o nome de uma variavel ou parametro,
+ * antes de consumir o ID: se o token corrente e uma palavra reservada,
+ * e erro semantico (regra 2). Caso contrario nao faz nada, e o
+ * consumir(TOKEN_ID) de quem chamou continua tratando os outros tokens
+ * como erro sintatico.
+ */
+void recusarPalavraReservada(void)
+{
+      if (ehPalavraReservada(lookahead.type))
+            erroSemantico(lookahead.line,
+                          "palavra reservada nao pode ser usada como nome de variavel");
+}
+
 /* ============================================================
  *  4. TRATAMENTO DE ERROS
  * ============================================================
@@ -1877,6 +1927,8 @@ void conferirVariaveisNaoUsadas(void);
 void programa(void);
 void declaracoes(void);
 void secao_var(void);
+int encerraSecaoVar(TokenNome t);
+void reservadaNaDeclaracao(void);
 void decl_var(void);
 int lista_ids(int indices[], int linhas[]);
 int tipo(TokenNome *tipoBasico);
@@ -2370,12 +2422,70 @@ void declaracoes(void)
  * A secao pode estar vazia (o anexo tem exemplos com "var" sem
  * nenhuma variavel embaixo), por isso o laco testa se ha um ID antes
  * de entrar.
+ *
+ * Regra 2: o laco tambem para numa palavra reservada que nao encerra a
+ * secao (ver encerraSecaoVar), como o "se" de "se: inteiro". Sem isso a
+ * secao terminaria ali e o erro viraria um sintatico de "faltou o
+ * INICIO". Quem decide se e mesmo uma declaracao e
+ * reservadaNaDeclaracao.
  */
 void secao_var(void)
 {
       consumir(TOKEN_VAR);
-      while (lookahead.type == TOKEN_ID)
+      while (lookahead.type == TOKEN_ID
+             || (ehPalavraReservada(lookahead.type)
+                 && !encerraSecaoVar(lookahead.type)))
+      {
+            if (lookahead.type != TOKEN_ID)
+                  reservadaNaDeclaracao();   /* sempre da erro */
             decl_var();
+      }
+}
+
+/*
+ * encerraSecaoVar
+ * ------------------------------------------------------------
+ * Diz se o token e uma das palavras reservadas que podem vir DEPOIS de
+ * uma secao var (o conjunto FOLLOW de secao_var): outro VAR,
+ * PROCEDIMENTO, FUNCAO ou o INICIO do programa. Elas encerram a secao
+ * normalmente e nao sao tratadas como nome de variavel.
+ *
+ * Parametro: t - tipo do token
+ * Retorno:   1 se o token encerra a secao var, 0 caso contrario.
+ */
+int encerraSecaoVar(TokenNome t)
+{
+      return t == TOKEN_VAR || t == TOKEN_PROCEDIMENTO
+             || t == TOKEN_FUNCAO || t == TOKEN_INICIO;
+}
+
+/*
+ * reservadaNaDeclaracao
+ * ------------------------------------------------------------
+ * Chamada por secao_var quando uma linha da secao comeca com palavra
+ * reservada. Com um token de lookahead so, nao da para saber se o
+ * programador quis declarar uma variavel com esse nome ("se: inteiro")
+ * ou se esqueceu o INICIO e ja comecou os comandos ("escreval(x)").
+ * Por isso a palavra e consumida e o token SEGUINTE decide:
+ *
+ *   ":" ou "," ... era uma declaracao: erro semantico (regra 2)
+ *   outro ........ faltou o INICIO: o mesmo erro sintatico de antes,
+ *                  apontando a palavra reservada
+ *
+ * Nas duas situacoes a funcao encerra o programa (nunca retorna). A
+ * unica diferenca visivel em relacao a antes e que o token seguinte
+ * aparece na listagem de tokens antes da mensagem de erro.
+ */
+void reservadaNaDeclaracao(void)
+{
+      Token reservada = lookahead;
+      nextToken();
+
+      if (lookahead.type == TOKEN_DOIS_PONTOS || lookahead.type == TOKEN_VIRGULA)
+            erroSemantico(reservada.line,
+                          "palavra reservada nao pode ser usada como nome de variavel");
+
+      erroSintatico(reservada, "INICIO");
 }
 
 /*
@@ -2443,12 +2553,18 @@ void decl_var(void)
  * O limite e conferido antes de gravar, para nunca escrever fora dos
  * vetores de decl_var.
  *
+ * Verificacao semantica: regra 2 (palavra reservada como nome), em
+ * recusarPalavraReservada. Vale para o primeiro nome e para os nomes
+ * depois de virgula ("a, se: inteiro").
+ *
  * Parametros: indices      - indice de cada nome na tabelaSimbolos
  *             linhas       - linha de cada nome, para mensagens de erro
  *             contagem_ids - posicao onde o ID corrente sera guardado
  */
 void registrarId(int indices[], int linhas[], int contagem_ids)
 {
+      recusarPalavraReservada();
+
       if (contagem_ids >= MAX_IDS_DECL)
             erroSemantico(lookahead.line, "muitas variaveis numa mesma declaracao");
 
@@ -2963,9 +3079,16 @@ void cmd_enquanto(void)
  *
  * Codigo gerado: <expr> ARMZ nome_da_funcao RTPR 1,0
  *
- * So faz sentido dentro de uma funcao: no programa principal ou num
- * procedimento nao existe onde guardar o valor, entao e erro semantico.
- * A conferencia do tipo do valor (regra 9) usa rotinaAtual->tipoRetorno.
+ * Verificacoes semanticas:
+ *   - retorne so faz sentido dentro de uma funcao: no programa principal
+ *     ou num procedimento nao existe onde guardar o valor;
+ *   - regra 9: o tipo do valor tem de ser compativel com o tipo de
+ *     retorno declarado (rotinaAtual->tipoRetorno, lido em funcao antes
+ *     do corpo), pela mesma regra da atribuicao (tipoAtribuivel):
+ *     retornar e guardar o valor na posicao com o nome da funcao.
+ *
+ * A primeira conferencia vem antes de tudo: no programa principal
+ * rotinaAtual e NULL, e a segunda nao poderia ler o tipo de retorno.
  */
 void cmd_retorne(void)
 {
@@ -2975,7 +3098,12 @@ void cmd_retorne(void)
       if (rotinaAtual == NULL || !rotinaAtual->ehFuncao)
             erroSemantico(linha, "retorne so pode ser usado dentro de uma funcao");
 
-      expr();
+      /* regra 9: o valor tem de caber no tipo declarado da funcao (inteiro
+       * pode ir para funcao real; real nao pode ir para funcao inteira) */
+      TokenNome tipo = expr();
+      if (!tipoAtribuivel(rotinaAtual->tipoRetorno, tipo))
+            erroSemantico(linha, "tipo do retorno incompativel com a declaracao da funcao");
+
       imprimirNome("ARMZ", nomeDoSimbolo(rotinaAtual->nome));
       imprimirDoisInteiros("RTPR", 1, 0);
 }
@@ -3121,13 +3249,16 @@ void parametros(Rotina *r)
  * todos os nomes sao globais, dois parametros com o mesmo nome (mesmo
  * em rotinas diferentes) sao erro de nome repetido.
  *
- * Verificacao semantica: regra 3 (o nome nao pode repetir o de uma
+ * Verificacoes semanticas: regra 2 (palavra reservada como nome, em
+ * recusarPalavraReservada) e regra 3 (o nome nao pode repetir o de uma
  * rotina nem o de outra variavel ou parametro).
  *
  * Parametro: r - rotina a que o parametro pertence
  */
 void parametro(Rotina *r)
 {
+      recusarPalavraReservada();
+
       int idx = lookahead.attribute.table_index;
       int linha = lookahead.line;
       consumir(TOKEN_ID);
