@@ -85,6 +85,7 @@
 #define MAX_LINHA_SAIDA 64      /* tamanho da linha formatada de um token  */
 #define MAX_ROTINAS     32      /* procedimentos e funcoes do programa    */
 #define MAX_PARAMS      8       /* parametros por rotina                  */
+#define MAX_IDS_DECL    32      /* nomes numa mesma linha de declaracao   */
 
 /* ============================================================
  *  1. DEFINICAO DOS TOKENS (Figura 2 do enunciado + extras)
@@ -437,6 +438,15 @@ static Rotina *rotinaAtual = NULL;
  * o AMEM. */
 static TNo *minitabela = NULL;
 static int proxEndereco = 0;
+
+/* Regra 4 (variavel com valor atribuido tem de ser usada). As marcas
+ * ficam fora da TNo porque o enunciado define a struct com exatamente
+ * quatro campos; os vetores sao indexados pelo endereco da variavel.
+ * Como cada variavel e um nome distinto da tabelaSimbolos, o endereco
+ * nunca passa de MAX_SIMBOLOS. Por serem globais, comecam zerados. */
+static int atribuida[MAX_SIMBOLOS];  /* 1 se recebeu valor (<- ou leia) */
+static int usada[MAX_SIMBOLOS];      /* 1 se foi lida numa expressao    */
+static int linhaDecl[MAX_SIMBOLOS];  /* linha da declaracao, para o erro */
 
 /* Prototipos: sairComErro e erroSemantico sao definidas na secao 4, mas
  * sao usadas antes dela pelas funcoes de tabela da secao 3. */
@@ -895,6 +905,27 @@ int busca_tabela_simbolos(const char *atributo_ID, int linha)
 
       erroSemantico(linha, "variavel nao declarada");
       return -1;  /* nunca chega aqui: erroSemantico encerra o programa */
+}
+
+/*
+ * existeNaMinitabela
+ * ------------------------------------------------------------
+ * Diz se ha uma variavel com esse nome na minitabela, sem gerar erro.
+ * Usada por procedimento e funcao para impedir que uma rotina tenha o
+ * nome de uma variavel ja declarada (regra 3). Nao da para usar
+ * busca_tabela_simbolos aqui, porque ela da erro quando NAO acha.
+ *
+ * Parametro: nome - nome a procurar
+ * Retorno:   1 se existe, 0 se nao.
+ */
+int existeNaMinitabela(const char *nome)
+{
+      for (TNo *atual = minitabela; atual != NULL; atual = atual->prox)
+      {
+            if (strcmp(atual->ID, nome) == 0)
+                  return 1;
+      }
+      return 0;
 }
 
 /*
@@ -1721,12 +1752,13 @@ void consumir(TokenNome esperado)
 /* Prototipos: uma funcao por nao-terminal da gramatica. Sao declarados
  * aqui em cima porque as producoes se chamam em ciclo (expr chega em
  * fator, que volta em expr). */
+void conferirVariaveisNaoUsadas(void);
 void programa(void);
 void declaracoes(void);
 void secao_var(void);
 void decl_var(void);
-int lista_ids(void);
-int tipo(void);
+int lista_ids(int indices[], int linhas[]);
+int tipo(TokenNome *tipoBasico);
 TokenNome tipo_basico(void);
 void procedimento(void);
 void funcao(void);
@@ -1939,8 +1971,9 @@ void termo(void)
  *    funcao(args) ...... <args> ARMZ params CHPR Lf CRVL funcao
  *    "texto" ........... nada (tratado pelo escreva)
  *
- * Verificacoes semanticas: regra 7 (procedimento nao pode ser usado em
- * expressao) e quantidade de argumentos, em gerarChamada.
+ * Verificacoes semanticas: regra 1 (variavel simples declarada antes do
+ * uso, via busca_tabela_simbolos), regra 7 (procedimento nao pode ser
+ * usado em expressao) e quantidade de argumentos, em gerarChamada.
  */
 void fator(void)
 {
@@ -2015,13 +2048,39 @@ void fator(void)
                   }
                   else
                   {
-                        /* variavel simples */
+                        /* variavel simples: tem de ter sido declarada */
+                        int endereco = busca_tabela_simbolos(nomeDoSimbolo(idx), linha);
+                        usada[endereco] = 1;   /* regra 4 */
                         imprimirNome("CRVL", nomeDoSimbolo(idx));
                   }
                   break;
             }
             default:
                   erroSintatico(lookahead, "expressao");
+      }
+}
+
+/*
+ * conferirVariaveisNaoUsadas
+ * ------------------------------------------------------------
+ * Regra 4: toda variavel declarada e com valor atribuido deve ser
+ * usada. Chamada no fim de programa(), quando todo o fonte ja foi lido.
+ * Parametros nao contam como atribuidos (o valor vem de quem chama).
+ *
+ * O erro aponta a linha da declaracao e cita o nome da variavel.
+ */
+void conferirVariaveisNaoUsadas(void)
+{
+      for (TNo *atual = minitabela; atual != NULL; atual = atual->prox)
+      {
+            int e = atual->endereco;
+            if (atribuida[e] && !usada[e])
+            {
+                  char mensagem[80];
+                  snprintf(mensagem, sizeof mensagem,
+                           "variavel %s recebe valor mas nunca e usada", atual->ID);
+                  erroSemantico(linhaDecl[e], mensagem);
+            }
       }
 }
 
@@ -2058,6 +2117,7 @@ void programa(void)
       consumir(TOKEN_INICIO);
       comandos();
       consumir(TOKEN_FIMALGORITMO);
+      conferirVariaveisNaoUsadas();
       imprimir("PARA");
 }
 
@@ -2098,39 +2158,107 @@ void secao_var(void)
 }
 
 /*
+ * registrarVar
+ * ------------------------------------------------------------
+ * Coloca uma variavel (ou parametro) na minitabela, conferindo antes
+ * que o nome nao e de uma rotina. A conferencia contra outras variaveis
+ * e feita dentro de inserirVarSemant (regra 3: nome unico).
+ *
+ * Usada por decl_var e por parametro, para que a regra fique escrita
+ * num lugar so.
+ *
+ * Parametros: idx        - indice do nome na tabelaSimbolos
+ *             tipoBasico - tipo basico declarado (TOKEN_INTEIRO, ...)
+ *             linha      - linha do nome, para as mensagens de erro
+ */
+void registrarVar(int idx, TokenNome tipoBasico, int linha)
+{
+      if (buscarRotina(idx) != NULL)
+            erroSemantico(linha, "nome ja usado por uma rotina");
+      inserirVarSemant(nomeDoSimbolo(idx), tipoBasico, linha);
+
+      /* inserirVarSemant acabou de dar o endereco proxEndereco - 1 */
+      linhaDecl[proxEndereco - 1] = linha;
+}
+
+/*
  * decl_var -> lista_ids ":" tipo
  * ------------------------------------------------------------
  * Uma linha de declaracao, como "nome, sobrenome: caractere".
  *
- * Como a lista de nomes vem antes do tipo, lista_ids devolve quantos
- * nomes leu e tipo devolve quantas posicoes cada um ocupa; o produto
- * soma no totalPosicoes, que vira o operando do AMEM.
+ * Como a lista de nomes vem antes do tipo, lista_ids guarda o indice e
+ * a linha de cada nome nos vetores locais e devolve quantos leu; tipo
+ * devolve quantas posicoes cada um ocupa, e o produto soma no
+ * totalPosicoes, que vira o operando do AMEM.
+ *
+ * Verificacao semantica: regra 3 (nome unico), em registrarVar.
  */
 void decl_var(void)
 {
-      int contagem_ids = lista_ids();
+      int indices[MAX_IDS_DECL];
+      int linhas[MAX_IDS_DECL];
+      TokenNome tipoBasico;
+
+      /* parte sintatica: lista de ids, ':' e o tipo */
+      int contagem_ids = lista_ids(indices, linhas);
       consumir(TOKEN_DOIS_PONTOS);
-      int posicoes = tipo();
+      int posicoes = tipo(&tipoBasico);
+
+      /* parte semantica: so agora o tipo e conhecido, entao cada nome
+       * vai para a minitabela, com a linha dele para as mensagens */
+      for (int i = 0; i < contagem_ids; i++)
+            registrarVar(indices[i], tipoBasico, linhas[i]);
 
       totalPosicoes += contagem_ids * posicoes;
 }
 
 /*
+ * registrarId
+ * ------------------------------------------------------------
+ * Guarda o indice e a linha do ID corrente na posicao contagem_ids
+ * dos vetores e consome o ID. Usada por lista_ids, que precisa
+ * guardar os nomes porque o tipo so aparece depois deles.
+ *
+ * O limite e conferido antes de gravar, para nunca escrever fora dos
+ * vetores de decl_var.
+ *
+ * Parametros: indices      - indice de cada nome na tabelaSimbolos
+ *             linhas       - linha de cada nome, para mensagens de erro
+ *             contagem_ids - posicao onde o ID corrente sera guardado
+ */
+void registrarId(int indices[], int linhas[], int contagem_ids)
+{
+      if (contagem_ids >= MAX_IDS_DECL)
+            erroSemantico(lookahead.line, "muitas variaveis numa mesma declaracao");
+
+      /* indice e linha guardados ANTES de consumir o ID */
+      indices[contagem_ids] = lookahead.attribute.table_index;
+      linhas[contagem_ids] = lookahead.line;
+      consumir(TOKEN_ID);
+}
+
+/*
  * lista_ids -> ID { "," ID }
  * ------------------------------------------------------------
- * Um ou mais identificadores separados por virgula.
+ * Um ou mais identificadores separados por virgula. Cada nome e
+ * guardado (indice e linha) para que decl_var possa inserir todos na
+ * minitabela depois de ler o tipo.
  *
- * Retorno: quantidade de identificadores. Comeca em 1 porque a gramatica
- *          garante o primeiro ID antes do laco.
+ * Parametros: indices - recebe o indice de cada nome na tabelaSimbolos
+ *             linhas  - recebe a linha de cada nome
+ * Retorno:    quantidade de identificadores lidos.
  */
-int lista_ids(void)
+int lista_ids(int indices[], int linhas[])
 {
-      int contagem_ids = 1;
-      consumir(TOKEN_ID);
+      int contagem_ids = 0;
+
+      registrarId(indices, linhas, contagem_ids);
+      contagem_ids++;
+
       while (lookahead.type == TOKEN_VIRGULA)
       {
             consumir(TOKEN_VIRGULA);
-            consumir(TOKEN_ID);
+            registrarId(indices, linhas, contagem_ids);
             contagem_ids++;
       }
 
@@ -2147,11 +2275,16 @@ int lista_ids(void)
  * Os limites do vetor sao lidos do atributo do token ANTES de cada
  * consumir, porque depois o lookahead ja e o ".." ou o "]".
  *
- * Retorno: posicoes de memoria ocupadas por variavel deste tipo: 1 para
- *          tipo basico e fim - inicio + 1 para vetor (o +1 conta as
- *          duas pontas: [1..4] tem 4 posicoes).
+ * O tipo basico lido e devolvido pelo ponteiro tipoBasico, porque o
+ * retorno ja e usado pelas posicoes. Num vetor, e o tipo do elemento.
+ *
+ * Parametro: tipoBasico - recebe o tipo basico lido (TOKEN_INTEIRO,
+ *                         TOKEN_REAL, TOKEN_CARACTERE ou TOKEN_LOGICO)
+ * Retorno:   posicoes de memoria ocupadas por variavel deste tipo: 1 para
+ *            tipo basico e fim - inicio + 1 para vetor (o +1 conta as
+ *            duas pontas: [1..4] tem 4 posicoes).
  */
-int tipo(void)
+int tipo(TokenNome *tipoBasico)
 {
       int num_posicoes = 1;
       if (lookahead.type == TOKEN_VETOR)
@@ -2167,7 +2300,7 @@ int tipo(void)
             consumir(TOKEN_DE);
             num_posicoes = fim - inicio + 1;
       }
-      tipo_basico();
+      *tipoBasico = tipo_basico();
       return num_posicoes;
 }
 
@@ -2305,9 +2438,10 @@ void cmd_escreva(void)
  *    p(args) / p ........ <args> ARMZ params CHPR Lp
  *    v[i] <- expr ....... nao suportado (vetores)
  *
- * Verificacoes semanticas: regra 8 (funcao nao pode ser usada como
- * procedimento) e identificador que nao e procedimento usado como
- * comando.
+ * Verificacoes semanticas: regra 1 (na atribuicao, a variavel de destino
+ * tem de ter sido declarada, via busca_tabela_simbolos), regra 8 (funcao
+ * nao pode ser usada como procedimento) e identificador que nao e
+ * procedimento usado como comando.
  */
 void cmd_id(void)
 {
@@ -2317,6 +2451,10 @@ void cmd_id(void)
       if (lookahead.type == TOKEN_ATRIB)
       {
             consumir(TOKEN_ATRIB);
+            /* o destino e conferido antes da expressao: em "y <- z" com os
+             * dois sem declaracao, o erro aponta o y, que vem primeiro */
+            int endereco = busca_tabela_simbolos(nomeDoSimbolo(idx), linha);
+            atribuida[endereco] = 1;   /* regra 4 */
             expr();
             imprimirNome("ARMZ", nomeDoSimbolo(idx));
       }
@@ -2380,6 +2518,9 @@ void cmd_leia(void)
  * so reconhece a variavel e devolve o nome para quem chamou decidir o
  * que emitir. O elemento de vetor nao e suportado na geracao.
  *
+ * Verificacao semantica: regra 1 (variavel declarada antes do uso, via
+ * busca_tabela_simbolos).
+ *
  * Retorno: indice do nome da variavel na tabelaSimbolos.
  */
 int variavel(void)
@@ -2387,6 +2528,8 @@ int variavel(void)
       int idx = lookahead.attribute.table_index;
       int linha = lookahead.line;
       consumir(TOKEN_ID);
+      int endereco = busca_tabela_simbolos(nomeDoSimbolo(idx), linha);
+      atribuida[endereco] = 1;   /* regra 4: variavel() so e usada pelo leia */
       if (lookahead.type == TOKEN_ABRE_COL)
       {
             naoSuportado(linha, "vetores");
@@ -2477,8 +2620,9 @@ void cmd_se(void)
  * comparacao so e emitida depois de ler o passo: e o sinal dele que
  * decide entre CMEG e CMAG.
  *
- * Verificacoes semanticas: passo nao constante e passo zero (que faria
- * o laco nunca terminar).
+ * Verificacoes semanticas: regra 1 (variavel de controle declarada antes
+ * do uso, via busca_tabela_simbolos), passo nao constante e passo zero
+ * (que faria o laco nunca terminar).
  */
 void cmd_para(void)
 {
@@ -2487,7 +2631,13 @@ void cmd_para(void)
 
       consumir(TOKEN_PARA);
       int idx = lookahead.attribute.table_index;
+      int linha = lookahead.line;
       consumir(TOKEN_ID);
+      int endereco = busca_tabela_simbolos(nomeDoSimbolo(idx), linha);
+
+      /* regra 4: o laco atribui a variavel e tambem a le na comparacao */
+      atribuida[endereco] = 1;
+      usada[endereco] = 1;
 
       consumir(TOKEN_DE);
       expr();
@@ -2622,12 +2772,23 @@ void cmd_retorne(void)
  *
  * A rotina e registrada antes do corpo, para que o nome ja seja
  * conhecido, e rotinaAtual marca que o corpo esta dentro dela.
+ *
+ * Verificacao semantica: regra 3 (o nome nao pode repetir o de outra
+ * rotina nem o de uma variavel ja declarada).
  */
 void procedimento(void)
 {
       consumir(TOKEN_PROCEDIMENTO);
       int idx = lookahead.attribute.table_index;
+      int linha = lookahead.line;
       consumir(TOKEN_ID);
+
+      /* regra 3: o nome nao pode repetir o de outra rotina nem o de uma
+       * variavel. Conferido antes de inserir, senao a rotina se acharia */
+      if (buscarRotina(idx) != NULL)
+            erroSemantico(linha, "rotina declarada mais de uma vez");
+      if (existeNaMinitabela(nomeDoSimbolo(idx)))
+            erroSemantico(linha, "nome ja usado por uma variavel");
 
       Rotina *r = inserirRotina(idx, 0);
       r->rotulo = proximo_rotulo();
@@ -2661,12 +2822,21 @@ void procedimento(void)
  * Gera o mesmo codigo do procedimento. A diferenca e que a funcao
  * reserva uma posicao de memoria a mais, com o proprio nome, onde o
  * retorne guarda o valor de retorno.
+ *
+ * Verificacao semantica: regra 3, a mesma do procedimento.
  */
 void funcao(void)
 {
       consumir(TOKEN_FUNCAO);
       int idx = lookahead.attribute.table_index;
+      int linha = lookahead.line;
       consumir(TOKEN_ID);
+
+      /* regra 3: mesma conferencia do procedimento */
+      if (buscarRotina(idx) != NULL)
+            erroSemantico(linha, "rotina declarada mais de uma vez");
+      if (existeNaMinitabela(nomeDoSimbolo(idx)))
+            erroSemantico(linha, "nome ja usado por uma variavel");
 
       Rotina *r = inserirRotina(idx, 1);
       r->rotulo = proximo_rotulo();
@@ -2717,15 +2887,25 @@ void parametros(Rotina *r)
  * rotina (na ordem da declaracao) e reserva uma posicao de memoria para
  * ele no AMEM: o parametro e uma posicao com nome, como uma variavel.
  *
+ * Pelo mesmo motivo o parametro tambem entra na minitabela, para que o
+ * seu uso dentro da rotina passe pela verificacao de declaracao. Como
+ * todos os nomes sao globais, dois parametros com o mesmo nome (mesmo
+ * em rotinas diferentes) sao erro de nome repetido.
+ *
+ * Verificacao semantica: regra 3 (o nome nao pode repetir o de uma
+ * rotina nem o de outra variavel ou parametro).
+ *
  * Parametro: r - rotina a que o parametro pertence
  */
 void parametro(Rotina *r)
 {
       int idx = lookahead.attribute.table_index;
+      int linha = lookahead.line;
       consumir(TOKEN_ID);
       consumir(TOKEN_DOIS_PONTOS);
       TokenNome tipoParam = tipo_basico();
       adicionarParametro(r, idx, tipoParam);
+      registrarVar(idx, tipoParam, linha);
       totalPosicoes++;
 }
 
