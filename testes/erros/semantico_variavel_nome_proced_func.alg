@@ -1,4 +1,4 @@
-algoritmo "VariavelNomeRotina"
+algoritmo "VariavelNomeProcedFunc"
 procedimento p
 inicio
 fimprocedimento

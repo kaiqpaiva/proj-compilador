@@ -1,4 +1,4 @@
-algoritmo "RotinasComRetorno"
+algoritmo "ProcedFuncComRetorno"
 procedimento linha_decorativa
 inicio
 escreval("--------------------------")

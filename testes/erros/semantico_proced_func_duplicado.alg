@@ -1,4 +1,4 @@
-algoritmo "RotinaDuplicada"
+algoritmo "ProcedFuncDuplicado"
 procedimento p
 inicio
 fimprocedimento

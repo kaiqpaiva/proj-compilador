@@ -58,7 +58,7 @@ Terminam com `Compilacao concluida sem erros. Codigo MEPA gerado em saida_mepa.t
 ./compilador testes/validos/12_se.alg
 ./compilador testes/validos/13_enquanto.alg
 ./compilador testes/validos/14_para.alg
-./compilador testes/validos/15_rotinas.alg
+./compilador testes/validos/15_proced_func.alg
 ```
 
 **Testes com erro**
@@ -85,13 +85,13 @@ Terminam com uma mensagem de erro (ou `NAO SUPORTADO`) e não geram `saida_mepa.
 ./compilador testes/erros/semantico_procedimento_em_expressao.alg
 ./compilador testes/erros/semantico_redeclaracao.alg
 ./compilador testes/erros/semantico_retorne_fora_funcao.alg
-./compilador testes/erros/semantico_rotina_duplicada.alg
-./compilador testes/erros/semantico_rotina_nome_variavel.alg
+./compilador testes/erros/semantico_proced_func_duplicado.alg
+./compilador testes/erros/semantico_proced_func_nome_variavel.alg
 ./compilador testes/erros/semantico_tipo_argumento.alg
 ./compilador testes/erros/semantico_tipo_atribuicao.alg
 ./compilador testes/erros/semantico_tipo_retorno.alg
 ./compilador testes/erros/semantico_tipos_expressao.alg
-./compilador testes/erros/semantico_variavel_nome_rotina.alg
+./compilador testes/erros/semantico_variavel_nome_proced_func.alg
 ./compilador testes/erros/sintatico_falta_entao.alg
 ./compilador testes/erros/sintatico_falta_fimpara.alg
 ./compilador testes/erros/sintatico_procedimento_sem_parametro.alg
@@ -149,12 +149,12 @@ python3 ferramentas/mepa.py saida_mepa.txt --entrada 4,7   # valores para os lei
 
 ### Analisador semântico
 
-- **Duas tabelas.** A minitabela `TNo` do enunciado guarda só as **variáveis** (e os parâmetros), com nome, endereço e tipo. As rotinas ficam numa tabela própria (`struct Rotina`), com o tipo de cada parâmetro e o tipo de retorno. A `tabela_simbolos` do léxico continua existindo: ela guarda o lexema de todo identificador que aparece no fonte, declarado ou não.
+- **Duas tabelas.** A minitabela `TNo` do enunciado guarda só as **variáveis** (e os parâmetros), com nome, endereço e tipo. Os procedimentos e funções ficam numa tabela própria (`struct ProcedFunc`), com o tipo de cada parâmetro e o tipo de retorno. A `tabela_simbolos` do léxico continua existindo: ela guarda o lexema de todo identificador que aparece no fonte, declarado ou não.
 - **Endereço** é a ordem de declaração: a primeira variável tem endereço 0, a segunda 1, e assim por diante. É um contador próprio, diferente do operando do `AMEM`, que também conta as posições de vetores e o retorno das funções.
 - **Acesso em dois passos.** `busca_tabela_simbolos()` recebe o nome e devolve o endereço, como pede o enunciado, ou dá erro de variável não declarada. Para consultar o tipo, `acessa_var_na_tabela_simbolos()` recebe o endereço e devolve o nó. A função de busca recebe também a linha, para que a mensagem de erro informe onde o problema está.
 - **Campo `tipo` com nomes curtos.** O campo tem 7 posições, então `"inteiro"` (7 letras mais o `'\0'`) e `"caractere"` não cabem. Guardamos `"int"`, `"real"`, `"char"` e `"logico"`.
 - **Nomes de variável com no máximo 15 caracteres**, o tamanho do campo `ID[16]`. Um nome maior dá erro em vez de ser truncado, porque truncar poderia fazer dois nomes diferentes virarem iguais.
-- **Nomes globais.** Variáveis, parâmetros e rotinas compartilham um único espaço de nomes, porque o enunciado exige identificadores únicos em todo o código. Por isso dois parâmetros com o mesmo nome, mesmo em rotinas diferentes, dão erro de nome repetido. O nome de uma função ocupa uma posição de memória (onde fica o valor de retorno), mas não entra na minitabela: ele é tratado pela tabela de rotinas.
+- **Nomes globais.** Variáveis, parâmetros, procedimentos e funções compartilham um único espaço de nomes, porque o enunciado exige identificadores únicos em todo o código. Por isso dois parâmetros com o mesmo nome, mesmo em procedimentos ou funções diferentes, dão erro de nome repetido. O nome de uma função ocupa uma posição de memória (onde fica o valor de retorno), mas não entra na minitabela: ele é tratado pela tabela de procedimentos e funções.
 - **Regra de mistura de tipos** (regra 5):
 
   | Operação | Aceita | Resultado |
@@ -170,7 +170,7 @@ python3 ferramentas/mepa.py saida_mepa.txt --entrada 4,7   # valores para os lei
 - **Atribuição, argumento e retorno** seguem a mesma regra: o valor precisa ser do mesmo tipo do destino, ou ser inteiro indo para real. Real indo para inteiro não pode, porque perderia a parte decimal.
 - **Condições e `para`.** A condição do `se` e do `enquanto` precisa ser lógica. No `para`, a variável de controle, o valor inicial, o limite e o passo precisam ser inteiros.
 - **Regra 4 (variável atribuída e não usada).** As marcas de "atribuída" e "usada" ficam em vetores paralelos indexados pelo endereço, e não dentro da `TNo`, porque o enunciado define a struct com exatamente quatro campos. A conferência é feita no fim do programa. Parâmetros não contam como atribuídos, porque o valor vem de quem chama.
-- **Regra 2 (palavra reservada como nome).** O léxico transforma `se` em `TOKEN_SE` antes de o parser ver o token. Para que `se: inteiro` dê erro semântico, e não sintático, o parser reconhece a palavra reservada onde espera o nome de uma variável ou de um parâmetro. Na primeira posição de uma linha da seção `var`, o token seguinte decide: se for `:` ou `,`, era uma declaração (erro semântico); senão, o programa esqueceu o `inicio` (erro sintático, como antes). Uma palavra reservada no corpo do programa (`se <- 1`) ou como nome de rotina (`procedimento se`) continua dando erro sintático, porque a regra trata de nomes de variável.
+- **Regra 2 (palavra reservada como nome).** O léxico transforma `se` em `TOKEN_SE` antes de o parser ver o token. Para que `se: inteiro` dê erro semântico, e não sintático, o parser reconhece a palavra reservada onde espera o nome de uma variável ou de um parâmetro. Na primeira posição de uma linha da seção `var`, o token seguinte decide: se for `:` ou `,`, era uma declaração (erro semântico); senão, o programa esqueceu o `inicio` (erro sintático, como antes). Uma palavra reservada no corpo do programa (`se <- 1`) ou como nome de procedimento ou função (`procedimento se`) continua dando erro sintático, porque a regra trata de nomes de variável.
 - **Função sem `retorne`** é erro semântico. A conferência é só de presença: um `retorne` dentro de um `se` já conta, porque o compilador não analisa todos os caminhos de execução.
 - **`leia`** aceita variável de qualquer tipo. Na MEPA, o `LEIT` lê sempre um número.
 

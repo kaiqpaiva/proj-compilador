@@ -1,4 +1,4 @@
-algoritmo "RotinaNomeVariavel"
+algoritmo "ProcedFuncNomeVariavel"
 var
 x: inteiro
 procedimento x

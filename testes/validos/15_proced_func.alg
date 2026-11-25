@@ -1,4 +1,4 @@
-algoritmo "Rotinas"
+algoritmo "ProcedFunc"
 procedimento linha
 inicio
    escreval(0)

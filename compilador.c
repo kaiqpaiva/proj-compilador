@@ -13,7 +13,7 @@
  *    gcc -g -Og -Wall compilador.c -o compilador
  *
  *  Executar:
- *    ./compilador testes/validos/15_rotinas.alg
+ *    ./compilador testes/validos/15_proced_func.alg
  *
  *  Saidas:
  *    saida_tokens.txt .. tokens e resultado (tambem na tela)
@@ -25,17 +25,18 @@
  *  ORGANIZACAO DO ARQUIVO
  *
  *    1. Definicao dos tokens .... enum TokenNome, OpRelType,
- *                                 struct Token, struct Rotina,
+ *                                 struct Token, struct ProcedFunc,
  *                                 tabelas de nomes e de instrucoes
  *                                 e struct TNo (minitabela)
  *    2. Estado global ........... buffer do fonte, posicao, linha,
  *                                 lookahead, tabela de simbolos,
- *                                 tabela de rotinas, arquivos e
- *                                 inicio da minitabela
+ *                                 tabela de procedimentos e
+ *                                 funcoes, arquivos e inicio da
+ *                                 minitabela
  *    3. Funcoes auxiliares ...... leitura do arquivo, tabela de
- *                                 simbolos, tabela de rotinas,
- *                                 formatacao da saida e operacoes
- *                                 da minitabela de simbolos (TNo)
+ *                                 simbolos, tabela de procedimentos
+ *                                 e funcoes, formatacao da saida e
+ *                                 operacoes da minitabela (TNo)
  *    4. Tratamento de erros ..... erros lexico, sintatico e semantico
  *                                 e recursos nao suportados
  *    5. Analisador lexico ....... Etapa 2 (obter_token)
@@ -71,14 +72,14 @@
 #include <string.h>
 #include <ctype.h>
 
-#define ARQUIVO_SAIDA   "saida_tokens.txt"
-#define ARQUIVO_MEPA    "saida_mepa.txt"
-#define MAX_LEXEMA      256     /* tamanho maximo de um lexema, com o '\0' */
-#define MAX_SIMBOLOS    512     /* entradas da tabela de simbolos          */
-#define MAX_LINHA_SAIDA 64      /* tamanho da linha formatada de um token  */
-#define MAX_ROTINAS     32      /* procedimentos e funcoes do programa    */
-#define MAX_PARAMS      8       /* parametros por rotina                  */
-#define MAX_IDS_DECL    32      /* nomes numa mesma linha de declaracao   */
+#define ARQUIVO_SAIDA    "saida_tokens.txt"
+#define ARQUIVO_MEPA     "saida_mepa.txt"
+#define MAX_LEXEMA       256     /* tamanho maximo de um lexema, com o '\0' */
+#define MAX_SIMBOLOS     512     /* entradas da tabela de simbolos          */
+#define MAX_LINHA_SAIDA  64      /* tamanho da linha formatada de um token  */
+#define MAX_PROCED_FUNCS 32      /* procedimentos e funcoes do programa     */
+#define MAX_PARAMS       8       /* parametros por procedimento ou funcao   */
+#define MAX_IDS_DECL     32      /* nomes numa mesma linha de declaracao    */
 
 /* ============================================================
  *  1. DEFINICAO DOS TOKENS (Figura 2 do enunciado + extras)
@@ -276,11 +277,12 @@ typedef struct {
 } Token;
 
 /*
- * Uma rotina declarada no programa (procedimento ou funcao).
+ * Um procedimento ou funcao declarado no programa.
  *
- * A minitabela (TNo) guarda so variaveis, entao as rotinas ficam numa
- * tabela propria. A analise semantica usa os tipos para conferir
- * chamadas e retornos; a geracao de codigo usa o rotulo e os nomes dos
+ * A minitabela (TNo) guarda so variaveis, entao procedimentos e funcoes
+ * ficam numa tabela propria. A analise semantica usa os tipos para
+ * conferir chamadas e retornos; a geracao de codigo usa o rotulo e os
+ * nomes dos
  * parametros para montar a chamada (CHPR). Nomes sao indices na
  * tabela_simbolos, e tipos usam o enum de tokens (TOKEN_INTEIRO...).
  */
@@ -293,7 +295,7 @@ typedef struct {
       TokenNome tiposParams[MAX_PARAMS];/* tipo de cada parametro           */
       TokenNome tipoRetorno;            /* tipo de retorno (so funcao)      */
       int temRetorne;                   /* 1 se o corpo tem algum retorne   */
-} Rotina;
+} ProcedFunc;
 
 /* Par lexema -> token usado na tabela de palavras reservadas. */
 typedef struct {
@@ -381,13 +383,13 @@ static int total_simbolos = 0;
  * cada vetor, 1 por parametro e mais 1 por funcao (valor de retorno). */
 static int total_posicoes = 0;
 
-/* Tabela de rotinas (procedimentos e funcoes), na ordem de declaracao. */
-static Rotina tabela_rotinas[MAX_ROTINAS];
-static int total_rotinas = 0;
+/* Tabela de procedimentos e funcoes, na ordem de declaracao. */
+static ProcedFunc tabela_proced_funcs[MAX_PROCED_FUNCS];
+static int total_proced_funcs = 0;
 
-/* Rotina cujo corpo esta sendo analisado (NULL no programa principal).
+/* ProcedFunc cujo corpo esta sendo analisado (NULL no programa principal).
  * Usada por cmd_retorne para saber em qual funcao guardar o valor. */
-static Rotina *rotina_atual = NULL;
+static ProcedFunc *proced_func_atual = NULL;
 
 /* Quantos textos ("abc") o parser ja leu em expressoes. Texto nao gera
  * codigo, o que so e correto no escreva (ver recusar_texto_sem_codigo). */
@@ -506,36 +508,36 @@ int inserir_simbolo(const char *lexema)
 }
 
 /*
- * inserir_rotina
+ * inserir_proced_func
  * ------------------------------------------------------------
- * Registra um procedimento ou funcao na tabela de rotinas, antes do
- * corpo, para que o nome ja seja conhecido se o corpo chamar a propria
- * rotina. O rotulo e o tipo de retorno sao preenchidos por quem chamou.
+ * Registra um procedimento ou funcao na tabela, antes do corpo, para
+ * que o nome ja seja conhecido se o corpo chamar a si mesmo. O rotulo e
+ * o tipo de retorno sao preenchidos por quem chamou.
  *
  * Parametros: nome     - indice do nome na tabela_simbolos
  *             ehFuncao - 1 para funcao, 0 para procedimento
- * Retorno:    ponteiro para a rotina criada, para o parser completar os
- *             campos e acrescentar os parametros.
+ * Retorno:    ponteiro para o procedimento ou funcao criado, para o
+ *             parser completar os campos e acrescentar os parametros.
  */
-Rotina *inserir_rotina(int nome, int ehFuncao)
+ProcedFunc *inserir_proced_func(int nome, int ehFuncao)
 {
-      if (total_rotinas >= MAX_ROTINAS)
+      if (total_proced_funcs >= MAX_PROCED_FUNCS)
       {
-            printf("ERRO: tabela de rotinas cheia (limite de %d rotinas)\n",
-                   MAX_ROTINAS);
+            printf("ERRO: tabela de procedimentos e funcoes cheia (limite de %d)\n",
+                   MAX_PROCED_FUNCS);
             fprintf(arquivo_saida,
-                    "ERRO: tabela de rotinas cheia (limite de %d rotinas)\n",
-                    MAX_ROTINAS);
+                    "ERRO: tabela de procedimentos e funcoes cheia (limite de %d)\n",
+                    MAX_PROCED_FUNCS);
             sair_com_erro();
       }
 
-      Rotina *r = &tabela_rotinas[total_rotinas];
+      ProcedFunc *r = &tabela_proced_funcs[total_proced_funcs];
       r->nome = nome;
       r->ehFuncao = ehFuncao;
       r->numParams = 0;
       r->temRetorne = 0;
 
-      total_rotinas++;
+      total_proced_funcs++;
 
       return r;
 }
@@ -543,21 +545,22 @@ Rotina *inserir_rotina(int nome, int ehFuncao)
 /*
  * adicionar_parametro
  * ------------------------------------------------------------
- * Acrescenta um parametro ao fim da lista da rotina, na ordem da
- * declaracao (a chamada depende dela para casar argumento e parametro).
+ * Acrescenta um parametro ao fim da lista do procedimento ou funcao, na
+ * ordem da declaracao (a chamada depende dela para casar argumento e
+ * parametro).
  *
- * Parametros: r    - rotina que recebe o parametro
+ * Parametros: r    - procedimento ou funcao que recebe o parametro
  *             nome - indice do nome do parametro na tabela_simbolos
  *             tipo - tipo declarado (TOKEN_INTEIRO, TOKEN_REAL, ...)
  */
-void adicionar_parametro(Rotina *r, int nome, TokenNome tipo)
+void adicionar_parametro(ProcedFunc *r, int nome, TokenNome tipo)
 {
       if (r->numParams >= MAX_PARAMS)
       {
-            printf("ERRO: rotina com parametros demais (limite de %d)\n",
+            printf("ERRO: procedimento ou funcao com parametros demais (limite de %d)\n",
                    MAX_PARAMS);
             fprintf(arquivo_saida,
-                    "ERRO: rotina com parametros demais (limite de %d)\n",
+                    "ERRO: procedimento ou funcao com parametros demais (limite de %d)\n",
                     MAX_PARAMS);
             sair_com_erro();
       }
@@ -569,21 +572,21 @@ void adicionar_parametro(Rotina *r, int nome, TokenNome tipo)
 }
 
 /*
- * buscar_rotina
+ * buscar_proced_func
  * ------------------------------------------------------------
- * Procura uma rotina pelo indice do nome (o lexico da sempre o mesmo
- * indice para o mesmo lexema).
+ * Procura um procedimento ou funcao pelo indice do nome (o lexico da
+ * sempre o mesmo indice para o mesmo lexema).
  *
  * Parametro: nome - indice do nome na tabela_simbolos
- * Retorno:   ponteiro para a rotina, ou NULL se o identificador nao for
- *            um procedimento nem uma funcao declarados.
+ * Retorno:   ponteiro para o procedimento ou funcao, ou NULL se o
+ *            identificador nao for um procedimento nem uma funcao.
  */
-Rotina *buscar_rotina(int nome)
+ProcedFunc *buscar_proced_func(int nome)
 {
-      for (int i = 0; i < total_rotinas; i++)
+      for (int i = 0; i < total_proced_funcs; i++)
       {
-            if (tabela_rotinas[i].nome == nome)
-                  return &tabela_rotinas[i];
+            if (tabela_proced_funcs[i].nome == nome)
+                  return &tabela_proced_funcs[i];
       }
       return NULL;
 }
@@ -841,8 +844,8 @@ int busca_tabela_simbolos(const char *atributo_ID, int linha)
  * existe_na_minitabela
  * ------------------------------------------------------------
  * Diz se ha uma variavel com esse nome, sem gerar erro (ao contrario de
- * busca_tabela_simbolos). Usada para impedir que uma rotina tenha o nome
- * de uma variavel (regra 3).
+ * busca_tabela_simbolos). Usada para impedir que um procedimento ou
+ * funcao tenha o nome de uma variavel (regra 3).
  *
  * Parametro: nome - nome a procurar
  * Retorno:   1 se existe, 0 se nao.
@@ -903,7 +906,8 @@ void liberar_tabela_simbolos(void)
  *  Fase 2 - tipos das expressoes (regra 5)
  * ------------------------------------------------------------
  *  As expressoes devolvem o tipo como TokenNome, como os parametros e o
- *  retorno das rotinas. Regra de mistura combinada pelo grupo:
+ *  retorno de procedimentos e funcoes. Regra de mistura combinada pelo
+ *  grupo:
  *
  *    + - *  ........ numeros; real se algum lado for real
  *    /  ............ numeros; sempre real (gera DIVF)
@@ -1591,7 +1595,7 @@ void imprimir_real(const char *instr, double valor)
  * imprimir_desvio
  * ------------------------------------------------------------
  * Escreve uma instrucao que USA um rotulo (desvios e chamada de
- * rotina).  Exemplo: "    DSVF L3"
+ * procedimento ou funcao).  Exemplo: "    DSVF L3"
  *
  * Parametros: instr  - DSVS, DSVF ou CHPR
  *             rotulo - numero do rotulo (o "L" e acrescentado aqui)
@@ -1646,15 +1650,16 @@ const char *nome_do_simbolo(int indice)
 }
 
 /*
- * gerar_chamada
+ * chamar_proced_func
  * ------------------------------------------------------------
- * Gera a parte comum a toda chamada de rotina, depois que o codigo dos
- * argumentos ja foi emitido (eles estao empilhados, o ultimo no topo):
+ * Gera a parte comum a toda chamada de procedimento ou funcao, depois
+ * que o codigo dos argumentos ja foi emitido (eles estao empilhados, o
+ * ultimo no topo):
  *
  *    ARMZ ultimo_parametro      <- o ARMZ retira o topo, por isso
  *    ...                           os parametros sao percorridos do
  *    ARMZ primeiro_parametro       ultimo para o primeiro
- *    CHPR Lrotina
+ *    CHPR Lproced_func
  *
  * Os parametros sao posicoes de memoria com nome (docs/etapa2.md, secao
  * 3). Numa funcao, quem chama emite depois o CRVL com o nome dela.
@@ -1666,17 +1671,17 @@ const char *nome_do_simbolo(int indice)
  *   tipo   - cada argumento tem de caber no parametro, pela regra da
  *            atribuicao (tipo_atribuivel).
  *
- * Parametros: r        - rotina chamada
+ * Parametros: r        - procedimento ou funcao chamado
  *             num_args - quantidade de argumentos da chamada
  *             linha    - linha da chamada, para as mensagens de erro
  *             tipos    - tipo de cada argumento, na ordem; pode ser NULL
  *                        quando num_args e 0 (o vetor nunca e lido)
  */
-void gerar_chamada(Rotina *r, int num_args, int linha, TokenNome tipos[])
+void chamar_proced_func(ProcedFunc *r, int num_args, int linha, TokenNome tipos[])
 {
       if (num_args != r->numParams)
-            erro_semantico(linha,
-                          "quantidade de argumentos incompativel com a declaracao da rotina");
+            erro_semantico(linha, "quantidade de argumentos incompativel com a "
+                                  "declaracao do procedimento ou funcao");
 
       /* do primeiro para o ultimo, para apontar o primeiro argumento
        * errado. Destino e o parametro, origem e o argumento */
@@ -1817,8 +1822,8 @@ int tipo(TokenNome *tipo_basico_lido);
 TokenNome tipo_basico(void);
 void procedimento(void);
 void funcao(void);
-void parametros(Rotina *r);
-void parametro(Rotina *r);
+void parametros(ProcedFunc *r);
+void parametro(ProcedFunc *r);
 void comandos(void);
 void comando(void);
 void cmd_id(void);
@@ -1840,9 +1845,10 @@ TokenNome fator(void);
 /*
  * argumentos -> expr { "," expr }
  * ------------------------------------------------------------
- * Argumentos de uma chamada de rotina: o codigo de cada um e emitido em
- * ordem, deixando os valores empilhados para gerar_chamada. (O escreva
- * tem laco proprio, para emitir um IMPR depois de cada argumento.)
+ * Argumentos de uma chamada de procedimento ou funcao: o codigo de cada
+ * um e emitido em ordem, deixando os valores empilhados para
+ * chamar_proced_func. (O escreva tem laco proprio, para emitir um IMPR
+ * depois de cada argumento.)
  *
  * O tipo de cada argumento vai para tipos, para a regra 6. O vetor e
  * declarado por quem chama, dentro do bloco da chamada: em f(g(1), 2),
@@ -1851,7 +1857,7 @@ TokenNome fator(void);
  * Parametro: tipos - recebe o tipo de cada argumento, na ordem; deve ter
  *                    MAX_PARAMS posicoes
  * Retorno:   quantidade de argumentos, conferida com a declaracao da
- *            rotina em gerar_chamada.
+ *            declaracao em chamar_proced_func.
  */
 int argumentos(TokenNome tipos[])
 {
@@ -1865,7 +1871,7 @@ int argumentos(TokenNome tipos[])
             TokenNome tipo = expr();
 
             /* so grava se couber; com argumentos demais, a contagem
-             * segue e gerar_chamada da o erro de quantidade */
+             * segue e chamar_proced_func da o erro de quantidade */
             if (contador < MAX_PARAMS)
                   tipos[contador] = tipo;
 
@@ -2086,7 +2092,7 @@ TokenNome termo(void)
  *
  * Verificacoes semanticas: regra 1 (variavel declarada), regra 5 (menos
  * unario so em numero), regra 7 (procedimento em expressao) e regra 6,
- * em gerar_chamada.
+ * em chamar_proced_func.
  *
  * Retorno: tipo do fator (do literal, da variavel ou o de retorno da
  *          funcao). Devolvido num unico return no fim, porque o
@@ -2160,7 +2166,7 @@ TokenNome fator(void)
                   else if (lookahead.type == TOKEN_ABRE_PAR)
                   {
                         /* chamada de funcao: eh_par(num) */
-                        Rotina *r = buscar_rotina(idx);
+                        ProcedFunc *r = buscar_proced_func(idx);
                         if (r == NULL)
                               erro_semantico(linha, "identificador nao e uma funcao");
                         if (!r->ehFuncao)
@@ -2172,7 +2178,7 @@ TokenNome fator(void)
                         int textos_antes = textos_sem_codigo;
                         int num_args = argumentos(tipos);
                         consumir(TOKEN_FECHA_PAR);
-                        gerar_chamada(r, num_args, linha, tipos);
+                        chamar_proced_func(r, num_args, linha, tipos);
                         recusar_texto_sem_codigo(textos_antes, linha);
 
                         /* o retorno fica na posicao com o nome da funcao */
@@ -2225,15 +2231,15 @@ void conferir_variaveis_nao_usadas(void)
  * Codigo gerado:
  *
  *        INPP
- *        DSVS Lp           <- pula o codigo das rotinas
- *        (rotinas)            gerado dentro de declaracoes()
+ *        DSVS Lp           <- pula o codigo dos procedimentos e funcoes
+ *        (proced. e funcoes)  gerado dentro de declaracoes()
  *    Lp: NADA
  *        AMEM n            <- n contado durante as declaracoes
  *        (comandos)
  *        PARA
  *
  * O AMEM fica depois de declaracoes() porque so ali todas as secoes var
- * foram lidas (podem vir depois de uma rotina).
+ * foram lidas (podem vir depois de um procedimento ou funcao).
  */
 void programa(void)
 {
@@ -2340,8 +2346,9 @@ void reservada_na_declaracao(void)
  * registrar_var
  * ------------------------------------------------------------
  * Coloca uma variavel (ou parametro) na minitabela, conferindo antes
- * que o nome nao e de uma rotina; inserir_var_semant confere as outras
- * variaveis (regra 3). Usada por decl_var e parametro.
+ * que o nome nao e de um procedimento ou funcao; inserir_var_semant
+ * confere as outras variaveis (regra 3). Usada por decl_var e
+ * parametro.
  *
  * Parametros: idx              - indice do nome na tabela_simbolos
  *             tipo_basico_lido - tipo basico declarado (TOKEN_INTEIRO, ...)
@@ -2349,8 +2356,8 @@ void reservada_na_declaracao(void)
  */
 void registrar_var(int idx, TokenNome tipo_basico_lido, int linha)
 {
-      if (buscar_rotina(idx) != NULL)
-            erro_semantico(linha, "nome ja usado por uma rotina");
+      if (buscar_proced_func(idx) != NULL)
+            erro_semantico(linha, "nome ja usado por um procedimento ou funcao");
       inserir_var_semant(nome_do_simbolo(idx), tipo_basico_lido, linha);
 
       /* inserir_var_semant acabou de dar o endereco prox_endereco - 1 */
@@ -2640,7 +2647,7 @@ void cmd_id(void)
       }
       else if (lookahead.type == TOKEN_ABRE_PAR)
       {
-            Rotina *r = buscar_rotina(idx);
+            ProcedFunc *r = buscar_proced_func(idx);
             if (r == NULL)
                   erro_semantico(linha, "identificador nao e um procedimento");
             if (r->ehFuncao)
@@ -2652,18 +2659,18 @@ void cmd_id(void)
             int textos_antes = textos_sem_codigo;
             int num_args = argumentos(tipos);
             consumir(TOKEN_FECHA_PAR);
-            gerar_chamada(r, num_args, linha, tipos);
+            chamar_proced_func(r, num_args, linha, tipos);
             recusar_texto_sem_codigo(textos_antes, linha);
       }
       else
       {
-            Rotina *r = buscar_rotina(idx);
+            ProcedFunc *r = buscar_proced_func(idx);
             if (r == NULL)
                   erro_semantico(linha, "identificador nao e um procedimento");
             if (r->ehFuncao)
                   erro_semantico(linha, "funcao nao pode ser usada como procedimento");
 
-            gerar_chamada(r, 0, linha, NULL);
+            chamar_proced_func(r, 0, linha, NULL);
       }
 }
 
@@ -2912,7 +2919,7 @@ void cmd_enquanto(void)
  * Codigo gerado: <expr> ARMZ nome_da_funcao RTPR 1,0
  *
  * Verificacoes semanticas: retorne so dentro de uma funcao (conferido
- * primeiro, porque fora dela rotina_atual e NULL) e regra 9, o valor tem
+ * primeiro, porque fora dela proced_func_atual e NULL) e regra 9, o valor tem
  * de caber no tipo de retorno declarado (tipo_atribuivel).
  */
 void cmd_retorne(void)
@@ -2920,20 +2927,20 @@ void cmd_retorne(void)
       int linha = lookahead.line;
       consumir(TOKEN_RETORNE);
 
-      if (rotina_atual == NULL || !rotina_atual->ehFuncao)
+      if (proced_func_atual == NULL || !proced_func_atual->ehFuncao)
             erro_semantico(linha, "retorne so pode ser usado dentro de uma funcao");
 
       /* marca para funcao() saber que o corpo devolve algum valor */
-      rotina_atual->temRetorne = 1;
+      proced_func_atual->temRetorne = 1;
 
       /* regra 9: o valor tem de caber no tipo declarado da funcao */
       int textos_antes = textos_sem_codigo;
       TokenNome tipo = expr();
-      if (!tipo_atribuivel(rotina_atual->tipoRetorno, tipo))
+      if (!tipo_atribuivel(proced_func_atual->tipoRetorno, tipo))
             erro_semantico(linha, "tipo do retorno incompativel com a declaracao da funcao");
       recusar_texto_sem_codigo(textos_antes, linha);
 
-      imprimir_nome("ARMZ", nome_do_simbolo(rotina_atual->nome));
+      imprimir_nome("ARMZ", nome_do_simbolo(proced_func_atual->nome));
       imprimir_dois_inteiros("RTPR", 1, 0);
 }
 
@@ -2954,8 +2961,8 @@ void cmd_retorne(void)
  * secao 8.4). O nivel e sempre 1 e o RTPR descarta 0 posicoes, porque
  * os parametros ficam em posicoes com nome, e nao na pilha.
  *
- * Verificacao semantica: regra 3 (nome nao repete outra rotina nem uma
- * variavel).
+ * Verificacao semantica: regra 3 (nome nao repete outro procedimento ou
+ * funcao nem uma variavel).
  */
 void procedimento(void)
 {
@@ -2964,15 +2971,15 @@ void procedimento(void)
       int linha = lookahead.line;
       consumir(TOKEN_ID);
 
-      /* regra 3, antes de inserir (senao a rotina se acharia) */
-      if (buscar_rotina(idx) != NULL)
-            erro_semantico(linha, "rotina declarada mais de uma vez");
+      /* regra 3, antes de inserir (senao o nome se acharia) */
+      if (buscar_proced_func(idx) != NULL)
+            erro_semantico(linha, "procedimento ou funcao declarado mais de uma vez");
       if (existe_na_minitabela(nome_do_simbolo(idx)))
             erro_semantico(linha, "nome ja usado por uma variavel");
 
-      Rotina *r = inserir_rotina(idx, 0);
+      ProcedFunc *r = inserir_proced_func(idx, 0);
       r->rotulo = proximo_rotulo();
-      rotina_atual = r;
+      proced_func_atual = r;
 
       imprimir_rotulo(r->rotulo);
       imprimir_inteiro("ENPR", 1);
@@ -2987,7 +2994,7 @@ void procedimento(void)
       comandos();
 
       imprimir_dois_inteiros("RTPR", 1, 0);
-      rotina_atual = NULL;
+      proced_func_atual = NULL;
 
       consumir(TOKEN_FIMPROCEDIMENTO);
 }
@@ -3011,14 +3018,14 @@ void funcao(void)
       consumir(TOKEN_ID);
 
       /* regra 3: mesma conferencia do procedimento */
-      if (buscar_rotina(idx) != NULL)
-            erro_semantico(linha, "rotina declarada mais de uma vez");
+      if (buscar_proced_func(idx) != NULL)
+            erro_semantico(linha, "procedimento ou funcao declarado mais de uma vez");
       if (existe_na_minitabela(nome_do_simbolo(idx)))
             erro_semantico(linha, "nome ja usado por uma variavel");
 
-      Rotina *r = inserir_rotina(idx, 1);
+      ProcedFunc *r = inserir_proced_func(idx, 1);
       r->rotulo = proximo_rotulo();
-      rotina_atual = r;
+      proced_func_atual = r;
 
       total_posicoes++;
 
@@ -3038,7 +3045,7 @@ void funcao(void)
             erro_semantico(linha, "funcao sem retorne");
 
       imprimir_dois_inteiros("RTPR", 1, 0);
-      rotina_atual = NULL;
+      proced_func_atual = NULL;
 
       consumir(TOKEN_FIMFUNCAO);
 }
@@ -3046,9 +3053,9 @@ void funcao(void)
 /*
  * parametros -> parametro { "," parametro }
  * ------------------------------------------------------------
- * Parametro: r - rotina que esta sendo declarada
+ * Parametro: r - procedimento ou funcao que esta sendo declarado
  */
-void parametros(Rotina *r)
+void parametros(ProcedFunc *r)
 {
       parametro(r);
       while (lookahead.type == TOKEN_VIRGULA)
@@ -3061,16 +3068,17 @@ void parametros(Rotina *r)
 /*
  * parametro -> ID ":" tipo_basico
  * ------------------------------------------------------------
- * Um parametro, como "a: inteiro". Registra nome e tipo na rotina e
- * reserva uma posicao no AMEM: o parametro e uma posicao com nome, como
- * uma variavel, e por isso tambem entra na minitabela. Como os nomes sao
- * globais, dois parametros iguais (mesmo em rotinas diferentes) sao erro.
+ * Um parametro, como "a: inteiro". Registra nome e tipo no procedimento
+ * ou funcao e reserva uma posicao no AMEM: o parametro e uma posicao com
+ * nome, como uma variavel, e por isso tambem entra na minitabela. Como os
+ * nomes sao globais, dois parametros iguais (mesmo em procedimentos ou
+ * funcoes diferentes) sao erro.
  *
  * Verificacoes semanticas: regras 2 e 3.
  *
- * Parametro: r - rotina a que o parametro pertence
+ * Parametro: r - procedimento ou funcao a que o parametro pertence
  */
-void parametro(Rotina *r)
+void parametro(ProcedFunc *r)
 {
       recusar_palavra_reservada();
 
